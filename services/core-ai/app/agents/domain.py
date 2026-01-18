@@ -3,7 +3,8 @@ from typing import Any
 from app.state import ChatState
 from app.agents.clarification import (
     build_pending_request,
-    detect_request_type,
+    classify_request,
+    extract_fields,
     next_question,
     update_pending_request,
 )
@@ -63,15 +64,16 @@ async def _handle_hr(
     message: str, pending: dict[str, Any] | None, state: ChatState
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") == "leave":
-        pending = update_pending_request(pending, message)
+        updates = await extract_fields("leave", message)
+        pending = update_pending_request(pending, updates)
         if pending["missing"]:
             return next_question(pending), pending, []
         action = await _submit_leave_request(pending, state)
         return _leave_success(pending), None, [action]
 
-    request_type = detect_request_type("hr", message)
+    request_type, fields = await classify_request("hr", message)
     if request_type == "leave":
-        pending = build_pending_request("hr", "leave", message)
+        pending = build_pending_request("hr", "leave", fields)
         if pending["missing"]:
             return next_question(pending), pending, []
         action = await _submit_leave_request(pending, state)
@@ -84,7 +86,8 @@ async def _handle_ops(
     message: str, pending: dict[str, Any] | None, state: ChatState
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") in {"expense", "travel"}:
-        pending = update_pending_request(pending, message)
+        updates = await extract_fields(pending.get("type", ""), message)
+        pending = update_pending_request(pending, updates)
         if pending["missing"]:
             return next_question(pending), pending, []
         if pending.get("type") == "expense":
@@ -93,9 +96,9 @@ async def _handle_ops(
         action = await _submit_travel_request(pending, state)
         return _travel_success(pending), None, [action]
 
-    request_type = detect_request_type("ops", message)
+    request_type, fields = await classify_request("ops", message)
     if request_type in {"expense", "travel"}:
-        pending = build_pending_request("ops", request_type, message)
+        pending = build_pending_request("ops", request_type, fields)
         if pending["missing"]:
             return next_question(pending), pending, []
         if request_type == "expense":
@@ -111,7 +114,8 @@ async def _handle_it(
     message: str, pending: dict[str, Any] | None, state: ChatState
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") in {"access", "ticket"}:
-        pending = update_pending_request(pending, message)
+        updates = await extract_fields(pending.get("type", ""), message)
+        pending = update_pending_request(pending, updates)
         if pending["missing"]:
             return next_question(pending), pending, []
         if pending.get("type") == "access":
@@ -120,9 +124,9 @@ async def _handle_it(
         action = await _submit_ticket_request(pending, state)
         return _ticket_success(pending), None, [action]
 
-    request_type = detect_request_type("it", message)
+    request_type, fields = await classify_request("it", message)
     if request_type in {"access", "ticket"}:
-        pending = build_pending_request("it", request_type, message)
+        pending = build_pending_request("it", request_type, fields)
         if pending["missing"]:
             return next_question(pending), pending, []
         if request_type == "access":

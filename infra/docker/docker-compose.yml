@@ -98,6 +98,11 @@ services:
       LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-}
       LANGCHAIN_ENDPOINT: ${LANGCHAIN_ENDPOINT:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://llm:80}
+      LLM_CHAT_PATH: ${LLM_CHAT_PATH:-/v1/chat/completions}
+      LLM_MODEL: ${LLM_MODEL:-Qwen/Qwen3-0.6B}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-10}
       WORKSPACE_SERVICE_URL: http://workspace-svc:8001
       LEAVE_SERVICE_URL: http://leave-svc:8002
       EXPENSE_SERVICE_URL: http://expense-svc:8003
