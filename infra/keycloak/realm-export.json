@@ -1,0 +1,65 @@
+{
+  "realm": "ai-secretary",
+  "enabled": true,
+  "displayName": "AI Secretary",
+  "roles": {
+    "realm": [
+      { "name": "employee" },
+      { "name": "manager" },
+      { "name": "hr_approver" },
+      { "name": "it_approver" },
+      { "name": "admin_approver" },
+      { "name": "system_admin" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "core-ai",
+      "name": "core-ai",
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "core-ai-secret",
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["http://localhost:8000/*"],
+      "webOrigins": ["*"]
+    },
+    {
+      "clientId": "web",
+      "name": "web",
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["*"]
+    }
+  ],
+  "users": [
+    {
+      "username": "employee1",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "password", "temporary": false }
+      ],
+      "realmRoles": ["employee"]
+    },
+    {
+      "username": "hr1",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "password", "temporary": false }
+      ],
+      "realmRoles": ["employee", "hr_approver"]
+    },
+    {
+      "username": "admin1",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "password", "temporary": false }
+      ],
+      "realmRoles": ["system_admin"]
+    }
+  ]
+}
