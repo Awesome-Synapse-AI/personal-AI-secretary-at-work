@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16
@@ -19,69 +17,69 @@ services:
     volumes:
       - redis_data:/data
 
-  qdrant:
-    image: qdrant/qdrant:v1.9.2
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_data:/qdrant/storage
+  # qdrant:
+  #   image: qdrant/qdrant:v1.9.2
+  #   ports:
+  #     - "6333:6333"
+  #   volumes:
+  #     - qdrant_data:/qdrant/storage
 
-  minio:
-    image: minio/minio:latest
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
+  # minio:
+  #   image: minio/minio:latest
+  #   command: ["server", "/data", "--console-address", ":9001"]
+  #   environment:
+  #     MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+  #     MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   volumes:
+  #     - minio_data:/data
 
-  keycloak-db:
-    image: postgres:16
-    environment:
-      POSTGRES_DB: ${KEYCLOAK_DB_NAME:-keycloak}
-      POSTGRES_USER: ${KEYCLOAK_DB_USER:-keycloak}
-      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak_password}
-    volumes:
-      - keycloak_data:/var/lib/postgresql/data
+  # keycloak-db:
+  #   image: postgres:16
+  #   environment:
+  #     POSTGRES_DB: ${KEYCLOAK_DB_NAME:-keycloak}
+  #     POSTGRES_USER: ${KEYCLOAK_DB_USER:-keycloak}
+  #     POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak_password}
+  #   volumes:
+  #     - keycloak_data:/var/lib/postgresql/data
 
-  keycloak:
-    image: quay.io/keycloak/keycloak:24.0.5
-    command: ["start-dev", "--import-realm"]
-    environment:
-      KC_DB: postgres
-      KC_DB_URL_HOST: keycloak-db
-      KC_DB_URL_DATABASE: ${KEYCLOAK_DB_NAME:-keycloak}
-      KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
-      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak_password}
-      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_password}
-    ports:
-      - "8080:8080"
-    volumes:
-      - ../keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
-    depends_on:
-      - keycloak-db
+  # keycloak:
+  #   image: quay.io/keycloak/keycloak:24.0.5
+  #   command: ["start-dev", "--import-realm"]
+  #   environment:
+  #     KC_DB: postgres
+  #     KC_DB_URL_HOST: keycloak-db
+  #     KC_DB_URL_DATABASE: ${KEYCLOAK_DB_NAME:-keycloak}
+  #     KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
+  #     KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak_password}
+  #     KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+  #     KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_password}
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - ../keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
+  #   depends_on:
+  #     - keycloak-db
 
-  prometheus:
-    image: prom/prometheus:v2.54.1
-    volumes:
-      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"
+  # prometheus:
+  #   image: prom/prometheus:v2.54.1
+  #   volumes:
+  #     - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+  #     - prometheus_data:/prometheus
+  #   ports:
+  #     - "9090:9090"
 
-  grafana:
-    image: grafana/grafana:11.1.0
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-    volumes:
-      - grafana_data:/var/lib/grafana
-    ports:
-      - "3001:3000"
+  # grafana:
+  #   image: grafana/grafana:11.1.0
+  #   environment:
+  #     GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+  #     GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+  #   volumes:
+  #     - grafana_data:/var/lib/grafana
+  #   ports:
+  #     - "3001:3000"
 
   core-ai:
     build:
@@ -98,34 +96,45 @@ services:
       LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-}
       LANGCHAIN_ENDPOINT: ${LANGCHAIN_ENDPOINT:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://llm:80}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://llm:11434}
       LLM_CHAT_PATH: ${LLM_CHAT_PATH:-/v1/chat/completions}
-      LLM_MODEL: ${LLM_MODEL:-Qwen/Qwen3-0.6B}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:0.6b}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-10}
-      WORKSPACE_SERVICE_URL: http://workspace-svc:8001
-      LEAVE_SERVICE_URL: http://leave-svc:8002
-      EXPENSE_SERVICE_URL: http://expense-svc:8003
-      TICKET_SERVICE_URL: http://ticket-svc:8004
-      ACCESS_SERVICE_URL: http://access-svc:8005
+      DOMAIN_SERVICE_URL: http://core-ai:8000/api/v1/domain
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8000:8000"
     depends_on:
       - redis
-      - keycloak
+      - llm
+      # domain endpoints are co-hosted in core-ai
 
   llm:
-    image: ghcr.io/huggingface/text-generation-inference:2.4.1
-    profiles: ["gpu"]
+    image: ollama/ollama:latest
     ports:
-      - "8081:80"
-    command: ["--model-id", "Qwen/Qwen3-0.6B", "--port", "80", "--sharded", "false"]
+      - "11434:11434"
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - "ollama serve > /tmp/ollama.log 2>&1 & sleep 5 && ollama pull qwen3:0.6b && tail -f /tmp/ollama.log"
 
   embedding-svc:
     image: python:3.11-slim
     profiles: ["embedding"]
     command: ["sleep", "infinity"]
+
 
 volumes:
   postgres_data:
@@ -135,3 +144,4 @@ volumes:
   keycloak_data:
   prometheus_data:
   grafana_data:
+  ollama_data:

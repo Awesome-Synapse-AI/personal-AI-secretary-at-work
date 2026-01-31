@@ -25,11 +25,9 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3:0.6b"
     llm_api_key: str | None = None
     llm_timeout_seconds: float = 10.0
-    workspace_service_url: str = "http://workspace-svc:8001"
-    leave_service_url: str = "http://leave-svc:8002"
-    expense_service_url: str = "http://expense-svc:8003"
-    ticket_service_url: str = "http://ticket-svc:8004"
-    access_service_url: str = "http://access-svc:8005"
+
+    # single container mode: domain endpoints mounted in core-ai under /api/v1/domain
+    domain_service_url: str = "http://localhost:8000/api/v1/domain"
 
 
 settings = Settings()
