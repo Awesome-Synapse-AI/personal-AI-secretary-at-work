@@ -54,6 +54,14 @@ def _default_entitlement_days(leave_type: str, month: int | None) -> float:
     return 0.0
 
 
+class EntitlementUpsert(BaseModel):
+    user_id: str
+    year: int
+    leave_type: str
+    days_available: float
+    month: int | None = None
+
+
 def _calc_days(start: str, end: str) -> float:
     s = date.fromisoformat(start)
     e = date.fromisoformat(end)
@@ -141,7 +149,33 @@ async def entitlements_user(
     return {"user_id": user_id, "year": year, "month": month, "leave_type": leave_type, "available_days": available}
 
 
+@router.post("/domain/entitlements")
+async def upsert_entitlement(payload: EntitlementUpsert, session: Session = Depends(get_session)):
+    ent = _get_entitlement(session, payload.user_id, payload.year, payload.leave_type, payload.month)
+    if ent:
+        ent.days_available = payload.days_available
+    else:
+        ent = LeaveEntitlement(
+            user_id=payload.user_id,
+            year=payload.year,
+            leave_type=payload.leave_type,
+            month=payload.month,
+            days_available=payload.days_available,
+        )
+        session.add(ent)
+    session.commit()
+    session.refresh(ent)
+    return {"entitlement": ent}
+
+
 @router.post("/domain/requests")
+class LeaveRequest(BaseModel):
+    leave_type: str
+    start_date: str
+    end_date: str
+    reason: str | None = None
+
+
 async def create_leave_request(
     payload: LeaveRequest, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):

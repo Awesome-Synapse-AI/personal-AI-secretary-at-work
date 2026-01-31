@@ -20,9 +20,24 @@ class ToolRunner:
         headers = {}
         if settings.service_auth_token:
             headers["Authorization"] = f"Bearer {settings.service_auth_token}"
-        response = await self._client.request(method, url, json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json() if response.content else {"status": "ok"}
+        try:
+            response = await self._client.request(method, url, json=payload, headers=headers)
+            response.raise_for_status()
+            if response.content:
+                data = response.json()
+                if isinstance(data, dict):
+                    return data
+            return {"status": "ok"}
+        except Exception as exc:
+            error_msg = ""
+            if hasattr(exc, "response") and getattr(exc, "response") is not None:
+                try:
+                    error_msg = exc.response.json().get("detail")  # type: ignore[attr-defined]
+                except Exception:
+                    error_msg = exc.response.text  # type: ignore[attr-defined]
+            if not error_msg:
+                error_msg = str(exc)
+            return {"status": "failed", "service": service, "error": error_msg}
 
 
 tool_runner = ToolRunner()

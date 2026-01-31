@@ -102,6 +102,8 @@ async def _handle_hr(
         if pending["missing"]:
             return next_question(pending), pending, []
         action = await _submit_leave_request(pending, state)
+        if action.get("status") != "submitted":
+            return _leave_failure(action), None, [action]
         return _leave_success(pending), None, [action]
 
     request_type, fields = await classify_request("hr", message)
@@ -110,6 +112,8 @@ async def _handle_hr(
         if pending["missing"]:
             return next_question(pending), pending, []
         action = await _submit_leave_request(pending, state)
+        if action.get("status") != "submitted":
+            return _leave_failure(action), None, [action]
         return _leave_success(pending), None, [action]
 
     return _domain_intro("hr"), pending, []
@@ -244,6 +248,11 @@ def _leave_success(pending: dict[str, Any]) -> str:
         "Leave request captured for "
         f"{filled.get('leave_type')} leave from {filled.get('start_date')} to {filled.get('end_date')}."
     )
+
+
+def _leave_failure(action: dict[str, Any]) -> str:
+    error = action.get("error") or "The leave request could not be submitted."
+    return f"Leave request failed: {error}"
 
 
 def _expense_success(pending: dict[str, Any]) -> str:
