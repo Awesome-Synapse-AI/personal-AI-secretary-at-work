@@ -17,16 +17,49 @@ def _add_event(state: ChatState, event_type: str, data: dict | None = None) -> N
 
 def _domain_intro(domain: str) -> str:
     if domain == "hr":
-        return "I can help with leave requests and HR policy questions."
+        return (
+            "HR help:\n"
+            "- Create or update leave requests (annual, sick, unpaid)\n"
+            "- Check leave balances and status\n"
+            "- Answer HR policy questions\n"
+            "Examples: \"I need sick leave next Monday\", \"How many vacation days do I have left?\""
+        )
     if domain == "ops":
-        return "I can help with expenses and travel requests."
+        return (
+            "Operations help:\n"
+            "- Log expenses and attach receipts\n"
+            "- Create travel requests (flights, hotels)\n"
+            "- Explain travel/expense policy limits\n"
+            "Examples: \"Add a $45 taxi from yesterday\", \"Book a flight to Singapore next Monday\""
+        )
     if domain == "it":
-        return "I can help with IT issues and access requests."
+        return (
+            "IT help:\n"
+            "- File IT tickets or facilities tickets\n"
+            "- Troubleshoot common issues (VPN, Wi‑Fi, laptop)\n"
+            "- Create access requests for systems/repos\n"
+            "Examples: \"VPN keeps dropping\", \"I need write access to Repo X\""
+        )
     if domain == "workspace":
-        return "I can help with room and desk bookings or facilities issues."
+        return (
+            "Workspace help:\n"
+            "- Book meeting rooms, desks, parking, equipment\n"
+            "- Raise facilities issues (AC, lights, etc.)\n"
+            "Examples: \"Book a room for 6 people at 3pm\", \"The AC is broken in Room 12\""
+        )
     if domain == "doc_qa":
-        return "I can answer questions about your documents and policies."
-    return "How can I help?"
+        return (
+            "Document Q&A:\n"
+            "- Answer questions over uploaded documents and policies\n"
+            "- Search user docs with filters\n"
+            "Examples: \"What is the per diem limit?\", \"Summarize the onboarding PDF\""
+        )
+    return (
+        "Hello. I can help with: HR (leave, policies), Operations (expenses, travel), IT (tickets, access), "
+        "Workspace (rooms, desks, facilities), and Document Q&A.\n"
+        "Try: \"I need sick leave tomorrow\", \"Log a $30 meal expense\", \"VPN not working\", "
+        "\"Book a room at 2pm\", or \"What’s our travel policy per diem?\""
+    )
 
 
 async def domain_node(state: ChatState) -> ChatState:

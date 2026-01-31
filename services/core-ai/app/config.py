@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     tools_enabled: bool = False
     service_auth_token: str | None = None
 
-    llm_base_url: str = "http://llm:80"
+    llm_base_url: str = "http://llm:11434"
     llm_chat_path: str = "/v1/chat/completions"
-    llm_model: str = "Qwen/Qwen3-0.6B"
+    llm_model: str = "qwen3:0.6b"
     llm_api_key: str | None = None
     llm_timeout_seconds: float = 10.0
     workspace_service_url: str = "http://workspace-svc:8001"

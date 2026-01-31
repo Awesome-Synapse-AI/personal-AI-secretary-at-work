@@ -1,6 +1,15 @@
 from typing import Any
 
+import logging
+
 from app.llm_client import call_llm_json
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 QUESTION_MAP = {
     "leave_type": "What kind of leave do you want to take (e.g., annual, sick)?",
@@ -84,11 +93,17 @@ async def classify_request(domain: str, message: str) -> tuple[str | None, dict[
     prompt = _classification_prompt(domain, allowed)
     payload = await call_llm_json(prompt, message, max_tokens=256)
     if not payload:
+        logger.warning("Clarify classify_request got empty payload for domain=%s", domain)
+        print(f"Clarify classify_request empty payload domain={domain}", flush=True)
         return None, {}
     request_type = payload.get("request_type")
     if request_type not in allowed:
+        logger.warning("Clarify classify_request invalid type %s for domain %s", request_type, domain)
+        print(f"Clarify classify_request invalid type {request_type} for domain {domain}", flush=True)
         return None, {}
     fields = payload.get("fields", {})
+    logger.info("Clarify classify_request payload: %s", payload)
+    print(f"Clarify classify_request payload: {payload}", flush=True)
     return request_type, _normalize_fields(request_type, fields)
 
 
@@ -98,11 +113,17 @@ async def extract_fields(request_type: str, message: str) -> dict[str, Any]:
     prompt = _extraction_prompt(request_type)
     payload = await call_llm_json(prompt, message, max_tokens=256)
     if not payload:
+        logger.warning("Clarify extract_fields got empty payload for type=%s", request_type)
+        print(f"Clarify extract_fields empty payload type={request_type}", flush=True)
         return {}
     declared = payload.get("request_type")
     if declared and declared != request_type:
+        logger.warning("Clarify extract_fields mismatched type %s (expected %s)", declared, request_type)
+        print(f"Clarify extract_fields mismatched type {declared} expected {request_type}", flush=True)
         return {}
     fields = payload.get("fields", {})
+    logger.info("Clarify extract_fields payload: %s", payload)
+    print(f"Clarify extract_fields payload: {payload}", flush=True)
     return _normalize_fields(request_type, fields)
 
 
@@ -118,7 +139,8 @@ def _classification_prompt(domain: str, allowed: list[str]) -> str:
     allowed_values = ", ".join(allowed)
     return (
         "You classify employee requests and extract fields. "
-        "Return only JSON with keys request_type and fields. "
+        "Return only a single JSON object with keys request_type and fields. "
+        "Do not include reasoning, code fences, or extra text. "
         f"Domain: {domain}. "
         f"request_type must be one of: {allowed_values}. "
         f"For each type, fields are: {details}. "
@@ -130,7 +152,8 @@ def _extraction_prompt(request_type: str) -> str:
     field_desc = FIELD_DESCRIPTIONS[request_type]
     return (
         "You extract fields for a single request type. "
-        "Return only JSON with keys request_type and fields. "
+        "Return only a single JSON object with keys request_type and fields. "
+        "Do not include reasoning, code fences, or extra text. "
         f"request_type must be '{request_type}'. "
         f"fields must include: {field_desc}. "
         "Use null for unknown values."

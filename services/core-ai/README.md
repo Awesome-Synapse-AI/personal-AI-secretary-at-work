@@ -19,9 +19,9 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `SERVICE_AUTH_TOKEN` (optional: bearer token for domain service calls)
 - `LOG_LEVEL` (default: INFO)
 - LLM classification:
-  - `LLM_BASE_URL` (default: http://llm:80)
+  - `LLM_BASE_URL` (default: http://llm:11434)
   - `LLM_CHAT_PATH` (default: /v1/chat/completions)
-  - `LLM_MODEL` (default: Qwen/Qwen3-0.6B)
+  - `LLM_MODEL` (default: qwen3:0.6b)
   - `LLM_API_KEY` (optional)
   - `LLM_TIMEOUT_SECONDS` (default: 10)
 - LangSmith tracing (optional):

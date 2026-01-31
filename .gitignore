@@ -210,3 +210,5 @@ __marimo__/
 tech_req.txt
 implementation_plan.md
 how-to-run-docker-compose.txt
+infra/docker/docker-compose.yml
+infra/docker/.env.example
