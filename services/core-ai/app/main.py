@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from app.agents.tools import tool_runner
 from app.api import router
 from app.config import settings
+from app.db import init_db
 from app.logging_config import configure_logging
 from app.memory.session_store import SessionStore
 
@@ -14,6 +15,7 @@ async def lifespan(app: FastAPI):
     session_store = SessionStore(settings.redis_url, settings.session_ttl_seconds)
     await session_store.connect()
     app.state.session_store = session_store
+    init_db()
     yield
     await session_store.close()
     await tool_runner.close()

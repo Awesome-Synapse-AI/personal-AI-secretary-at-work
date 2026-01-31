@@ -8,3 +8,5 @@ langsmith>=0.1,<1
 redis>=5,<6
 python-jose>=3.3,<4
 structlog>=24.1,<25
+sqlmodel>=0.0.16
+psycopg2-binary>=2.9,<3

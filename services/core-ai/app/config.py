@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     default_tenant_id: str = "default"
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 86400
+    database_url: str = "postgresql://ai:ai_password@postgres:5432/ai_secretary"
 
     auth_disabled: bool = True
     keycloak_realm_url: str = "http://localhost:8080/realms/ai-secretary"
