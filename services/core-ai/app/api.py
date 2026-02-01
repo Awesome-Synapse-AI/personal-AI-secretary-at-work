@@ -33,6 +33,8 @@ from app.models import (
     TicketUpdateInput,
     AccessRequestInput,
     TicketInput,
+    TicketStatus,
+    TicketType,
 )
 from app.schemas.chat import ChatRequest, ChatResponse, UserContext
 from app.utils import iter_tokens
@@ -553,8 +555,8 @@ async def reject_travel(travel_id: int, payload: TravelDecision | None = None, s
 async def create_ticket(
     ticket: TicketInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
-    if ticket.type not in {"it", "facilities"}:
-        raise HTTPException(400, "type must be 'it' or 'facilities'")
+    if ticket.type not in TicketType:
+        raise HTTPException(400, f"type must be one of: {', '.join([t.value for t in TicketType])}")
     data = TicketModel(
         user_id=_current_user_id(user),
         type=ticket.type,
@@ -562,12 +564,16 @@ async def create_ticket(
         description=ticket.description,
         location=ticket.location,
         priority=ticket.priority,
-        status="open",
+        status=TicketStatus.OPEN,
     )
     session.add(data)
     session.commit()
     session.refresh(data)
-    return {"status": "submitted", "ticket": data}
+    return {
+        "status": "submitted",
+        "message": "Ticket submitted successfully",
+        "ticket": data,
+    }
 
 
 @router.get("/domain/tickets/{ticket_id}")
@@ -590,7 +596,11 @@ async def update_ticket(ticket_id: int, payload: TicketUpdateInput, session: Ses
     ticket = session.get(TicketModel, ticket_id)
     if not ticket:
         raise HTTPException(404, "ticket not found")
-    for k, v in payload.model_dump(exclude_none=True).items():
+    updates = payload.model_dump(exclude_none=True)
+    if "status" in updates:
+        if updates["status"] not in TicketStatus:
+            raise HTTPException(400, f"status must be one of: {', '.join([s.value for s in TicketStatus])}")
+    for k, v in updates.items():
         setattr(ticket, k, v)
     ticket.updated_at = datetime.utcnow()
     session.add(ticket)

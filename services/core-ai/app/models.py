@@ -59,12 +59,12 @@ class TravelRequest(SQLModel, table=True):
 class Ticket(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: str
-    type: str
+    type: "TicketType"
     category: Optional[str] = None
     description: str
     location: Optional[str] = None
     priority: Optional[str] = None
-    status: str = "open"
+    status: TicketStatus = Field(default=TicketStatus.OPEN)
     assignee: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -131,6 +131,21 @@ class Booking(SQLModel, table=True):
 
 
 # ---------- Pydantic request/decision schemas ----------
+
+
+class TicketType(str, Enum):
+    IT = "it"
+    FACILITIES = "facilities"
+    HR = "hr"
+    FINANCE = "finance"
+    OTHER = "other"
+
+
+class TicketStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
 
 
 class BookingRequestInput(BaseModel):
@@ -204,7 +219,7 @@ class AccessRequestInput(BaseModel):
 
 
 class TicketInput(BaseModel):
-    type: str
+    type: TicketType
     category: str | None = None
     description: str
     location: str | None = None
