@@ -43,7 +43,7 @@ from app.models import (
     EventSource,
 )
 from app.schemas.chat import ChatRequest, ChatResponse, UserContext
-from app.utils import iter_tokens
+from app.utils import iter_tokens, utcnow
 
 router = APIRouter()
 
@@ -395,7 +395,7 @@ async def entitlements_me(
     user: UserContext = Depends(get_current_user),
 ):
     user_id = _current_user_id(user)
-    year = year or datetime.utcnow().year
+    year = year or utcnow().year
     ent = _get_entitlement(session, user_id, year, leave_type, month)
     available = ent.days_available if ent else 0.0
     return {"user_id": user_id, "year": year, "month": month, "leave_type": leave_type, "available_days": available}
@@ -409,7 +409,7 @@ async def entitlements_user(
     month: int | None = None,
     session: Session = Depends(get_session),
 ):
-    year = year or datetime.utcnow().year
+    year = year or utcnow().year
     ent = _get_entitlement(session, user_id, year, leave_type, month)
     available = ent.days_available if ent else 0.0
     return {"user_id": user_id, "year": year, "month": month, "leave_type": leave_type, "available_days": available}
@@ -489,7 +489,7 @@ async def approve_leave_request(
         raise HTTPException(404, "request not found")
     lr.status = "approved"
     lr.approver_id = _current_user_id(user)
-    lr.updated_at = datetime.utcnow()
+    lr.updated_at = utcnow()
     session.add(lr)
     session.commit()
     session.refresh(lr)
@@ -506,7 +506,7 @@ async def reject_leave_request(
     lr.status = "rejected"
     lr.reject_reason = reason
     lr.approver_id = _current_user_id(user)
-    lr.updated_at = datetime.utcnow()
+    lr.updated_at = utcnow()
     session.add(lr)
     session.commit()
     session.refresh(lr)
@@ -575,7 +575,7 @@ async def create_travel(
         source_type=EventSource.TRAVEL,
         source_id=data.id,
     )
-    return {"status": "submitted", "travel": data}
+    return {"status": "submitted", "travel": data.model_dump(mode="python")}
 
 
 _receipts: dict[str, dict] = {}
@@ -607,7 +607,7 @@ async def approve_expense(expense_id: int, payload: ExpenseDecision | None = Non
     if not exp:
         raise HTTPException(404, "expense not found")
     exp.status = "approved"
-    exp.updated_at = datetime.utcnow()
+    exp.updated_at = utcnow()
     session.add(exp)
     session.commit()
     session.refresh(exp)
@@ -620,7 +620,7 @@ async def reject_expense(expense_id: int, payload: ExpenseDecision | None = None
     if not exp:
         raise HTTPException(404, "expense not found")
     exp.status = "rejected"
-    exp.updated_at = datetime.utcnow()
+    exp.updated_at = utcnow()
     exp.project_code = exp.project_code  # no-op to silence lint
     session.add(exp)
     session.commit()
@@ -649,11 +649,11 @@ async def approve_travel(travel_id: int, payload: TravelDecision | None = None, 
         raise HTTPException(409, "Another travel request overlaps these dates; capacity is full for that window")
 
     tr.status = "approved"
-    tr.updated_at = datetime.utcnow()
+    tr.updated_at = utcnow()
     session.add(tr)
     session.commit()
     session.refresh(tr)
-    return {"status": "approved", "travel": tr, "reason": payload.reason if payload else None}
+    return {"status": "approved", "travel": tr.model_dump(mode="python"), "reason": payload.reason if payload else None}
 
 
 @router.post("/domain/travel-requests/{travel_id}/reject")
@@ -662,11 +662,11 @@ async def reject_travel(travel_id: int, payload: TravelDecision | None = None, s
     if not tr:
         raise HTTPException(404, "travel request not found")
     tr.status = "rejected"
-    tr.updated_at = datetime.utcnow()
+    tr.updated_at = utcnow()
     session.add(tr)
     session.commit()
     session.refresh(tr)
-    return {"status": "rejected", "travel": tr, "reason": payload.reason if payload else None}
+    return {"status": "rejected", "travel": tr.model_dump(mode="python"), "reason": payload.reason if payload else None}
 
 
 # ---------- Tickets ----------
@@ -680,7 +680,7 @@ async def create_ticket(
         raise HTTPException(400, f"type must be one of: {', '.join([t.value for t in TicketType])}")
     data = TicketModel(
         user_id=_current_user_id(user),
-        type=ticket.type,
+        type=TicketType(ticket.type),
         category=ticket.category,
         description=ticket.description,
         location=ticket.location,
@@ -697,19 +697,19 @@ async def create_ticket(
     }
 
 
+@router.get("/domain/tickets/me")
+async def list_my_tickets(session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+    user_id = _current_user_id(user)
+    results = session.exec(select(TicketModel).where(TicketModel.user_id == user_id)).all()
+    return {"tickets": results}
+
+
 @router.get("/domain/tickets/{ticket_id}")
 async def get_ticket(ticket_id: int, session: Session = Depends(get_session)):
     ticket = session.get(TicketModel, ticket_id)
     if not ticket:
         raise HTTPException(404, "ticket not found")
     return ticket
-
-
-@router.get("/domain/tickets/me")
-async def list_my_tickets(session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
-    user_id = _current_user_id(user)
-    results = session.exec(select(TicketModel).where(TicketModel.user_id == user_id)).all()
-    return {"tickets": results}
 
 
 @router.patch("/domain/tickets/{ticket_id}")
@@ -723,7 +723,7 @@ async def update_ticket(ticket_id: int, payload: TicketUpdateInput, session: Ses
             raise HTTPException(400, f"status must be one of: {', '.join([s.value for s in TicketStatus])}")
     for k, v in updates.items():
         setattr(ticket, k, v)
-    ticket.updated_at = datetime.utcnow()
+    ticket.updated_at = utcnow()
     session.add(ticket)
     session.commit()
     session.refresh(ticket)
@@ -744,7 +744,7 @@ async def create_access_request(
         select(AccessRequestModel).where(
             AccessRequestModel.user_id == user_id,
             AccessRequestModel.resource == payload.resource,
-            AccessRequestModel.requested_role == payload.requested_role,
+            AccessRequestModel.requested_role == RequestedRole(payload.requested_role),
             AccessRequestModel.status.in_([AccessStatus.PENDING, AccessStatus.APPROVED]),
         )
     ).first()
@@ -754,7 +754,7 @@ async def create_access_request(
     data = AccessRequestModel(
         user_id=user_id,
         resource=payload.resource,
-        requested_role=payload.requested_role,
+        requested_role=RequestedRole(payload.requested_role),
         justification=payload.justification,
         status=AccessStatus.PENDING,
     )
@@ -794,7 +794,7 @@ async def approve_access_request(
         raise HTTPException(404, "access request not found")
     ar.status = AccessStatus.APPROVED
     ar.approver_id = _current_user_id(user)
-    ar.updated_at = datetime.utcnow()
+    ar.updated_at = utcnow()
     session.add(ar)
     session.commit()
     session.refresh(ar)
@@ -811,7 +811,7 @@ async def reject_access_request(
     ar.status = AccessStatus.REJECTED
     ar.reject_reason = reason
     ar.approver_id = _current_user_id(user)
-    ar.updated_at = datetime.utcnow()
+    ar.updated_at = utcnow()
     session.add(ar)
     session.commit()
     session.refresh(ar)
@@ -831,7 +831,7 @@ async def availability(
 ):
     user_id = user or _current_user_id(current)
     try:
-        start_dt = dateparser.parse(start) if start else datetime.utcnow()
+        start_dt = dateparser.parse(start) if start else utcnow()
         end_dt = dateparser.parse(end) if end else start_dt.replace(hour=23, minute=59, second=59)  # same day default
     except Exception:
         raise HTTPException(400, "Invalid start/end for availability")

@@ -309,7 +309,12 @@ async def _call_tool(
     try:
         result = await tool_runner.call(service, "POST", path, payload)
         _add_event(state, "tool_result", {"service": service, "result": result})
-        return {"type": action_type, "status": result.get("status", "submitted"), "payload": payload}
+        return {
+            "type": action_type,
+            "status": result.get("status", "submitted"),
+            "payload": payload,
+            "error": result.get("error"),
+        }
     except Exception as exc:  # pragma: no cover - network errors
         _add_event(state, "tool_error", {"service": service, "error": str(exc)})
         return {"type": action_type, "status": "failed", "payload": payload}

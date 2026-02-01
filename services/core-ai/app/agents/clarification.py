@@ -62,6 +62,7 @@ FIELD_SETS = {
     RequestType.WORKSPACE_BOOKING: [
         "resource_type",
         "resource_name",
+        "resource_id",
         "start_time",
         "end_time",
         "location",

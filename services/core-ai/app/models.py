@@ -4,6 +4,22 @@ from enum import Enum
 
 from sqlmodel import Field, SQLModel
 from pydantic import BaseModel
+from app.utils import utcnow
+
+
+class TicketType(str, Enum):
+    IT = "it"
+    FACILITIES = "facilities"
+    HR = "hr"
+    FINANCE = "finance"
+    OTHER = "other"
+
+
+class TicketStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
 
 
 class LeaveEntitlement(SQLModel, table=True):
@@ -23,8 +39,8 @@ class LeaveRequest(SQLModel, table=True):
     end_date: date
     reason: Optional[str] = None
     status: str = "submitted"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
     approver_id: Optional[str] = None
     reject_reason: Optional[str] = None
     requested_days: float = 0.0
@@ -39,8 +55,8 @@ class Expense(SQLModel, table=True):
     category: str
     project_code: Optional[str] = None
     status: str = "submitted"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class TravelRequest(SQLModel, table=True):
@@ -52,8 +68,8 @@ class TravelRequest(SQLModel, table=True):
     return_date: Optional[date] = None
     travel_class: Optional[str] = None
     status: str = "submitted"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class Ticket(SQLModel, table=True):
@@ -66,8 +82,8 @@ class Ticket(SQLModel, table=True):
     priority: Optional[str] = None
     status: TicketStatus = Field(default=TicketStatus.OPEN)
     assignee: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 
@@ -99,8 +115,8 @@ class AccessRequest(SQLModel, table=True):
     status: AccessStatus = Field(default=AccessStatus.PENDING)
     approver_id: Optional[str] = None
     reject_reason: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class CalendarEvent(SQLModel, table=True):
@@ -113,8 +129,8 @@ class CalendarEvent(SQLModel, table=True):
     source_id: Optional[int] = Field(default=None, index=True)
     status: str = "busy"
     google_event_id: Optional[str] = Field(default=None, index=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 # Workspace resources
@@ -160,26 +176,11 @@ class Booking(SQLModel, table=True):
     start_time: datetime
     end_time: datetime
     status: str = "confirmed"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 # ---------- Pydantic request/decision schemas ----------
-
-
-class TicketType(str, Enum):
-    IT = "it"
-    FACILITIES = "facilities"
-    HR = "hr"
-    FINANCE = "finance"
-    OTHER = "other"
-
-
-class TicketStatus(str, Enum):
-    OPEN = "open"
-    IN_PROGRESS = "in_progress"
-    RESOLVED = "resolved"
-    CLOSED = "closed"
 
 
 class BookingRequestInput(BaseModel):
@@ -248,12 +249,12 @@ class TicketUpdateInput(BaseModel):
 
 class AccessRequestInput(BaseModel):
     resource: str
-    requested_role: RequestedRole
+    requested_role: str
     justification: str
 
 
 class TicketInput(BaseModel):
-    type: TicketType
+    type: str
     category: str | None = None
     description: str
     location: str | None = None
