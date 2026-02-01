@@ -77,7 +77,7 @@ def _assert_available(session: Session, resource_type: ResourceType, resource_id
         select(Booking).where(
             Booking.resource_type == resource_type,
             Booking.resource_id == resource_id,
-            Booking.status == "confirmed",
+            Booking.status.in_(["confirmed", "submitted"]),
             Booking.start_time < end,
             Booking.end_time > start,
         )
@@ -103,7 +103,7 @@ def _available_resources(session: Session, resource_type: ResourceType, start: d
             select(Booking).where(
                 Booking.resource_type == resource_type,
                 Booking.resource_id == res.id,
-                Booking.status == "confirmed",
+                Booking.status.in_(["confirmed", "submitted"]),
                 Booking.start_time < end,
                 Booking.end_time > start,
             )
@@ -432,14 +432,13 @@ async def create_travel(
     end_expr = func.coalesce(TravelModel.return_date, TravelModel.departure_date)
     conflict = session.exec(
         select(TravelModel).where(
-            TravelModel.user_id == _current_user_id(user),
-            TravelModel.status == "approved",
+            TravelModel.status.in_(["approved", "submitted"]),
             TravelModel.departure_date <= ret,
             end_expr >= dep,
         )
     ).first()
     if conflict:
-        raise HTTPException(409, "You already have an approved travel overlapping these dates")
+        raise HTTPException(409, "Another travel request overlaps these dates; please choose different dates")
 
     data = TravelModel(
         user_id=_current_user_id(user),
@@ -517,15 +516,14 @@ async def approve_travel(travel_id: int, payload: TravelDecision | None = None, 
     end_expr = func.coalesce(TravelModel.return_date, TravelModel.departure_date)
     conflict = session.exec(
         select(TravelModel).where(
-            TravelModel.user_id == tr.user_id,
-            TravelModel.status == "approved",
+            TravelModel.status.in_(["approved", "submitted"]),
             TravelModel.id != tr.id,
             TravelModel.departure_date <= ret,
             end_expr >= dep,
         )
     ).first()
     if conflict:
-        raise HTTPException(409, "This user already has approved travel overlapping these dates")
+        raise HTTPException(409, "Another travel request overlaps these dates; capacity is full for that window")
 
     tr.status = "approved"
     tr.updated_at = datetime.utcnow()
