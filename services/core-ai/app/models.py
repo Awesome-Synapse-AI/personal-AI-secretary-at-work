@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from typing import Optional
+from enum import Enum
 
 from sqlmodel import Field, SQLModel
 
@@ -77,5 +78,52 @@ class AccessRequest(SQLModel, table=True):
     status: str = "pending"
     approver_id: Optional[str] = None
     reject_reason: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# Workspace resources
+
+
+class ResourceType(str, Enum):
+    ROOM = "room"
+    DESK = "desk"
+    EQUIPMENT = "equipment"
+    PARKING = "parking"
+
+
+class Room(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    capacity: int = 1
+    location: Optional[str] = None
+
+
+class Desk(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    location: Optional[str] = None
+
+
+class Equipment(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    type: Optional[str] = None
+
+
+class ParkingSpot(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    location: Optional[str] = None
+
+
+class Booking(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: str
+    resource_type: ResourceType
+    resource_id: int
+    start_time: datetime
+    end_time: datetime
+    status: str = "confirmed"
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

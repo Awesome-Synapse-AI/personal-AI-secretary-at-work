@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlmodel import Session, select
+from dateutil import parser as dateparser
 
 from app.auth import get_current_user, get_user_from_token
 from app.chat_service import handle_chat
@@ -15,6 +16,12 @@ from app.models import (
     Expense as ExpenseModel,
     Ticket as TicketModel,
     TravelRequest as TravelModel,
+    Room,
+    Desk,
+    Equipment,
+    ParkingSpot,
+    Booking,
+    ResourceType
 )
 from app.schemas.chat import ChatRequest, ChatResponse, UserContext
 from app.utils import iter_tokens
@@ -54,6 +61,78 @@ def _default_entitlement_days(leave_type: str, month: int | None) -> float:
     return 0.0
 
 
+def _assert_available(session: Session, resource_type: ResourceType, resource_id: int, start: datetime, end: datetime) -> None:
+    overlap = session.exec(
+        select(Booking).where(
+            Booking.resource_type == resource_type,
+            Booking.resource_id == resource_id,
+            Booking.status == "confirmed",
+            Booking.start_time < end,
+            Booking.end_time > start,
+        )
+    ).first()
+    if overlap:
+        available = _available_resources(session, resource_type, start, end)
+        raise HTTPException(409, {"error": "Time slot is already booked for this resource", "available": available})
+
+
+def _available_resources(session: Session, resource_type: ResourceType, start: datetime, end: datetime) -> list[dict]:
+    if resource_type == ResourceType.ROOM:
+        resources = session.exec(select(Room)).all()
+    elif resource_type == ResourceType.DESK:
+        resources = session.exec(select(Desk)).all()
+    elif resource_type == ResourceType.EQUIPMENT:
+        resources = session.exec(select(Equipment)).all()
+    else:
+        resources = session.exec(select(ParkingSpot)).all()
+
+    available: list[dict] = []
+    for res in resources:
+        conflict = session.exec(
+            select(Booking).where(
+                Booking.resource_type == resource_type,
+                Booking.resource_id == res.id,
+                Booking.status == "confirmed",
+                Booking.start_time < end,
+                Booking.end_time > start,
+            )
+        ).first()
+        if not conflict:
+            available.append({"name": res.name, "id": res.id})
+    return available
+
+
+def _parse_time_range(start_text: str, end_text: str) -> tuple[datetime, datetime]:
+    try:
+        start_dt = dateparser.parse(start_text)
+        end_dt = dateparser.parse(end_text)
+    except Exception:
+        raise HTTPException(400, "Cannot parse provided start/end time. Please use a clear time expression.")
+    if not start_dt or not end_dt:
+        raise HTTPException(400, "Cannot parse provided start/end time. Please use a clear time expression.")
+    if end_dt <= start_dt:
+        raise HTTPException(400, "End time must be after start time.")
+    return start_dt, end_dt
+
+
+def _resource_id_by_name(session: Session, resource_type: ResourceType, name: str | None, fallback_id: str | None) -> int:
+    if name:
+        if resource_type == ResourceType.DESK:
+            res = session.exec(select(Desk).where(Desk.name == name)).first()
+        elif resource_type == ResourceType.EQUIPMENT:
+            res = session.exec(select(Equipment).where(Equipment.name == name)).first()
+        elif resource_type == ResourceType.PARKING:
+            res = session.exec(select(ParkingSpot).where(ParkingSpot.name == name)).first()
+        else:
+            res = session.exec(select(Room).where(Room.name == name)).first()
+        if not res:
+            raise HTTPException(404, "Resource name not found")
+        return res.id  # type: ignore[return-value]
+    if fallback_id is None:
+        raise HTTPException(400, "resource_name is required when id is not provided")
+    return int(fallback_id)
+
+
 class EntitlementUpsert(BaseModel):
     user_id: str
     year: int
@@ -77,37 +156,95 @@ class BookingRequestModel(BaseModel):
     desk_id: str | None = None
     equipment_id: str | None = None
     parking_spot_id: str | None = None
-    start_time: str | None = None
-    end_time: str | None = None
+    resource_name: str | None = None
+    resource_type: str | None = None
+    start_time: str
+    end_time: str
 
 
 @router.get("/domain/rooms")
-async def list_rooms():
-    return {"rooms": [{"id": "room-1", "name": "Room 1"}, {"id": "room-2", "name": "Room 2"}]}
+async def list_rooms(session: Session = Depends(get_session)):
+    rooms = session.exec(select(Room)).all()
+    return {"rooms": rooms}
 
 
 @router.post("/domain/rooms/{room_id}/book")
-async def book_room(room_id: str, payload: BookingRequestModel):
-    return {"status": "submitted", "room_id": room_id, "payload": payload.model_dump()}
+async def book_room(room_id: int, payload: BookingRequestModel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+    user_id = _current_user_id(user)
+    start_dt, end_dt = _parse_time_range(payload.start_time, payload.end_time)
+    _assert_available(session, ResourceType.ROOM, room_id, start_dt, end_dt)
+    booking = Booking(
+        user_id=user_id,
+        resource_type=ResourceType.ROOM,
+        resource_id=room_id,
+        start_time=start_dt,
+        end_time=end_dt,
+        status="confirmed",
+    )
+    session.add(booking)
+    session.commit()
+    session.refresh(booking)
+    return {"status": "submitted", "booking": booking}
 
 
 @router.post("/domain/desks/book")
-async def book_desk(payload: BookingRequestModel):
-    return {"status": "submitted", "desk_id": payload.desk_id, "payload": payload.model_dump()}
+async def book_desk(payload: BookingRequestModel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+    desk_id = _resource_id_by_name(session, ResourceType.DESK, payload.resource_name, payload.desk_id)
+    user_id = _current_user_id(user)
+    start_dt, end_dt = _parse_time_range(payload.start_time, payload.end_time)
+    _assert_available(session, ResourceType.DESK, desk_id, start_dt, end_dt)
+    booking = Booking(
+        user_id=user_id,
+        resource_type=ResourceType.DESK,
+        resource_id=desk_id,
+        start_time=start_dt,
+        end_time=end_dt,
+        status="confirmed",
+    )
+    session.add(booking)
+    session.commit()
+    session.refresh(booking)
+    return {"status": "submitted", "booking": booking}
 
 
 @router.post("/domain/equipment/reserve")
-async def reserve_equipment(payload: BookingRequestModel):
-    if not payload.equipment_id:
-        raise HTTPException(400, "equipment_id required")
-    return {"status": "submitted", "equipment_id": payload.equipment_id, "payload": payload.model_dump()}
+async def reserve_equipment(payload: BookingRequestModel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+    equipment_id = _resource_id_by_name(session, ResourceType.EQUIPMENT, payload.resource_name, payload.equipment_id)
+    user_id = _current_user_id(user)
+    start_dt, end_dt = _parse_time_range(payload.start_time, payload.end_time)
+    _assert_available(session, ResourceType.EQUIPMENT, equipment_id, start_dt, end_dt)
+    booking = Booking(
+        user_id=user_id,
+        resource_type=ResourceType.EQUIPMENT,
+        resource_id=equipment_id,
+        start_time=start_dt,
+        end_time=end_dt,
+        status="confirmed",
+    )
+    session.add(booking)
+    session.commit()
+    session.refresh(booking)
+    return {"status": "submitted", "booking": booking}
 
 
 @router.post("/domain/parking/book")
-async def book_parking(payload: BookingRequestModel):
-    if not payload.parking_spot_id:
-        raise HTTPException(400, "parking_spot_id required")
-    return {"status": "submitted", "parking_spot_id": payload.parking_spot_id, "payload": payload.model_dump()}
+async def book_parking(payload: BookingRequestModel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+    spot_id = _resource_id_by_name(session, ResourceType.PARKING, payload.resource_name, payload.parking_spot_id)
+    user_id = _current_user_id(user)
+    start_dt, end_dt = _parse_time_range(payload.start_time, payload.end_time)
+    _assert_available(session, ResourceType.PARKING, spot_id, start_dt, end_dt)
+    booking = Booking(
+        user_id=user_id,
+        resource_type=ResourceType.PARKING,
+        resource_id=spot_id,
+        start_time=start_dt,
+        end_time=end_dt,
+        status="confirmed",
+    )
+    session.add(booking)
+    session.commit()
+    session.refresh(booking)
+    return {"status": "submitted", "booking": booking}
 
 
 # ---------- Leave ----------
