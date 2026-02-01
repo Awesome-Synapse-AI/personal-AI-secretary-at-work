@@ -33,6 +33,8 @@ from app.models import (
     TicketUpdateInput,
     AccessRequestInput,
     TicketInput,
+    AccessStatus,
+    RequestedRole,
     TicketStatus,
     TicketType,
 )
@@ -616,17 +618,35 @@ async def update_ticket(ticket_id: int, payload: TicketUpdateInput, session: Ses
 async def create_access_request(
     payload: AccessRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
+    if payload.requested_role not in RequestedRole:
+        raise HTTPException(400, f"requested_role must be one of: {', '.join([r.value for r in RequestedRole])}")
+    user_id = _current_user_id(user)
+    dup = session.exec(
+        select(AccessRequestModel).where(
+            AccessRequestModel.user_id == user_id,
+            AccessRequestModel.resource == payload.resource,
+            AccessRequestModel.requested_role == payload.requested_role,
+            AccessRequestModel.status.in_([AccessStatus.PENDING, AccessStatus.APPROVED]),
+        )
+    ).first()
+    if dup:
+        raise HTTPException(409, "An access request for this resource and role already exists or was approved")
+
     data = AccessRequestModel(
-        user_id=_current_user_id(user),
+        user_id=user_id,
         resource=payload.resource,
         requested_role=payload.requested_role,
         justification=payload.justification,
-        status="pending",
+        status=AccessStatus.PENDING,
     )
     session.add(data)
     session.commit()
     session.refresh(data)
-    return {"status": "submitted", "access_request": data}
+    return {
+        "status": "submitted",
+        "message": "Access request submitted successfully",
+        "access_request": data,
+    }
 
 
 @router.get("/domain/access-requests/me")
@@ -640,6 +660,8 @@ async def list_my_access_requests(session: Session = Depends(get_session), user:
 async def list_access_requests(status: str | None = None, session: Session = Depends(get_session)):
     statement = select(AccessRequestModel)
     if status:
+        if status not in AccessStatus:
+            raise HTTPException(400, f"status must be one of: {', '.join([s.value for s in AccessStatus])}")
         statement = statement.where(AccessRequestModel.status == status)
     return {"access_requests": session.exec(statement).all()}
 
@@ -651,7 +673,7 @@ async def approve_access_request(
     ar = session.get(AccessRequestModel, request_id)
     if not ar:
         raise HTTPException(404, "access request not found")
-    ar.status = "approved"
+    ar.status = AccessStatus.APPROVED
     ar.approver_id = _current_user_id(user)
     ar.updated_at = datetime.utcnow()
     session.add(ar)
@@ -667,7 +689,7 @@ async def reject_access_request(
     ar = session.get(AccessRequestModel, request_id)
     if not ar:
         raise HTTPException(404, "access request not found")
-    ar.status = "rejected"
+    ar.status = AccessStatus.REJECTED
     ar.reject_reason = reason
     ar.approver_id = _current_user_id(user)
     ar.updated_at = datetime.utcnow()

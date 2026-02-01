@@ -70,13 +70,26 @@ class Ticket(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+
+class RequestedRole(str, Enum):
+    VIEWER = "viewer"
+    EDITOR = "editor"
+    ADMIN = "admin"
+    OWNER = "owner"
+
+
+class AccessStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
 class AccessRequest(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: str
     resource: str
-    requested_role: str
+    requested_role: "RequestedRole"
     justification: str
-    status: str = "pending"
+    status: AccessStatus = Field(default=AccessStatus.PENDING)
     approver_id: Optional[str] = None
     reject_reason: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -214,7 +227,7 @@ class TicketUpdateInput(BaseModel):
 
 class AccessRequestInput(BaseModel):
     resource: str
-    requested_role: str
+    requested_role: RequestedRole
     justification: str
 
 
