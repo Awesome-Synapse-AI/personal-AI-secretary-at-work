@@ -205,7 +205,10 @@ def _extraction_prompt(request_type: RequestType) -> str:
 
 def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | None) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
-    allowed = FIELD_SETS.get(RequestType(request_type)) if isinstance(request_type, RequestType) else FIELD_SETS.get(RequestType(request_type))
+    req_enum = _as_request_type(request_type)
+    if not req_enum:
+        return normalized
+    allowed = FIELD_SETS.get(req_enum, [])
     source = fields if isinstance(fields, dict) else {}
     for key in allowed or []:
         value = source.get(key)
@@ -217,10 +220,7 @@ def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | 
 
 def _missing_fields(pending: dict[str, Any]) -> list[str]:
     request_type = pending.get("type", "")
-    try:
-        req_enum = RequestType(request_type)
-    except ValueError:
-        req_enum = None
+    req_enum = _as_request_type(request_type)
     filled = pending.get("filled", {})
 
     if req_enum == RequestType.LEAVE:
@@ -249,3 +249,14 @@ def _is_missing(value: Any) -> bool:
     if isinstance(value, str) and not value.strip():
         return True
     return False
+
+
+def _as_request_type(value: Any) -> RequestType | None:
+    if isinstance(value, RequestType):
+        return value
+    if isinstance(value, str):
+        try:
+            return RequestType(value)
+        except ValueError:
+            return None
+    return None

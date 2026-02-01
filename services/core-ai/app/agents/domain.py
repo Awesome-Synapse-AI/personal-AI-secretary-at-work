@@ -130,8 +130,12 @@ async def _handle_ops(
             return next_question(pending), pending, []
         if pending.get("type") == RequestType.EXPENSE:
             action = await _submit_expense_request(pending, state)
+            if action.get("status") != "submitted":
+                return _expense_failure(action), None, [action]
             return _expense_success(pending), None, [action]
         action = await _submit_travel_request(pending, state)
+        if action.get("status") != "submitted":
+            return _travel_failure(action), None, [action]
         return _travel_success(pending), None, [action]
 
     request_type, fields = await classify_request("ops", message)
@@ -141,8 +145,12 @@ async def _handle_ops(
             return next_question(pending), pending, []
         if request_type == RequestType.EXPENSE:
             action = await _submit_expense_request(pending, state)
+            if action.get("status") != "submitted":
+                return _expense_failure(action), None, [action]
             return _expense_success(pending), None, [action]
         action = await _submit_travel_request(pending, state)
+        if action.get("status") != "submitted":
+            return _travel_failure(action), None, [action]
         return _travel_success(pending), None, [action]
 
     return _domain_intro("ops"), pending, []
@@ -328,12 +336,22 @@ def _expense_success(pending: dict[str, Any]) -> str:
     )
 
 
+def _expense_failure(action: dict[str, Any]) -> str:
+    error = action.get("error") or "The expense could not be submitted."
+    return f"Expense submission failed: {error}"
+
+
 def _travel_success(pending: dict[str, Any]) -> str:
     filled = pending["filled"]
     return (
         "Travel request captured from "
         f"{filled.get('origin')} to {filled.get('destination')} on {filled.get('departure_date')}."
     )
+
+
+def _travel_failure(action: dict[str, Any]) -> str:
+    error = action.get("error") or "The travel request could not be submitted."
+    return f"Travel request failed: {error}"
 
 
 def _ticket_success(pending: dict[str, Any]) -> str:

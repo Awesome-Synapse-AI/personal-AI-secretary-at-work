@@ -2,8 +2,8 @@ from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
 from sqlmodel import Session, select
+from sqlalchemy import func
 from dateutil import parser as dateparser
 
 from app.auth import get_current_user, get_user_from_token
@@ -21,7 +21,18 @@ from app.models import (
     Equipment,
     ParkingSpot,
     Booking,
-    ResourceType
+    ResourceType,
+    BookingRequestInput,
+    LeaveRequestInput,
+    EntitlementUpsert,
+    ExpenseInput,
+    ExpenseDecision,
+    TravelInput,
+    TravelDecision,
+    ReceiptInput,
+    TicketUpdateInput,
+    AccessRequestInput,
+    TicketInput,
 )
 from app.schemas.chat import ChatRequest, ChatResponse, UserContext
 from app.utils import iter_tokens
@@ -115,6 +126,46 @@ def _parse_time_range(start_text: str, end_text: str) -> tuple[datetime, datetim
     return start_dt, end_dt
 
 
+def _validate_expense(expense: ExpenseInput) -> None:
+    if expense.amount <= 0:
+        raise HTTPException(400, "Amount must be greater than zero")
+    if not expense.currency or len(expense.currency.strip()) != 3:
+        raise HTTPException(400, "Currency must be a 3-letter code")
+    try:
+        date.fromisoformat(expense.date)
+    except Exception:
+        raise HTTPException(400, "Date must be in YYYY-MM-DD format")
+    if not expense.category:
+        raise HTTPException(400, "Category is required")
+
+
+def _validate_travel(travel: TravelInput) -> None:
+    if not travel.origin or not travel.destination:
+        raise HTTPException(400, "Origin and destination are required")
+    try:
+        dep = date.fromisoformat(travel.departure_date)
+    except Exception:
+        raise HTTPException(400, "departure_date must be YYYY-MM-DD")
+    ret = None
+    if travel.return_date:
+        try:
+            ret = date.fromisoformat(travel.return_date)
+        except Exception:
+            raise HTTPException(400, "return_date must be YYYY-MM-DD")
+    if ret and ret < dep:
+        raise HTTPException(400, "return_date must be on/after departure_date")
+    if travel.preferred_departure_time:
+        try:
+            dateparser.parse(travel.preferred_departure_time)
+        except Exception:
+            raise HTTPException(400, "preferred_departure_time is not understood")
+    if travel.preferred_return_time:
+        try:
+            dateparser.parse(travel.preferred_return_time)
+        except Exception:
+            raise HTTPException(400, "preferred_return_time is not understood")
+
+
 def _resource_id_by_name(session: Session, resource_type: ResourceType, name: str | None, fallback_id: str | None) -> int:
     if name:
         if resource_type == ResourceType.DESK:
@@ -133,14 +184,6 @@ def _resource_id_by_name(session: Session, resource_type: ResourceType, name: st
     return int(fallback_id)
 
 
-class EntitlementUpsert(BaseModel):
-    user_id: str
-    year: int
-    leave_type: str
-    days_available: float
-    month: int | None = None
-
-
 def _calc_days(start: str, end: str) -> float:
     s = date.fromisoformat(start)
     e = date.fromisoformat(end)
@@ -150,18 +193,6 @@ def _calc_days(start: str, end: str) -> float:
 # ---------- Workspace ----------
 
 
-class BookingRequestModel(BaseModel):
-    user_id: str | None = None
-    room_id: str | None = None
-    desk_id: str | None = None
-    equipment_id: str | None = None
-    parking_spot_id: str | None = None
-    resource_name: str | None = None
-    resource_type: str | None = None
-    start_time: str
-    end_time: str
-
-
 @router.get("/domain/rooms")
 async def list_rooms(session: Session = Depends(get_session)):
     rooms = session.exec(select(Room)).all()
@@ -169,7 +200,7 @@ async def list_rooms(session: Session = Depends(get_session)):
 
 
 @router.post("/domain/rooms/{room_id}/book")
-async def book_room(room_id: int, payload: BookingRequestModel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+async def book_room(room_id: int, payload: BookingRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
     user_id = _current_user_id(user)
     start_dt, end_dt = _parse_time_range(payload.start_time, payload.end_time)
     _assert_available(session, ResourceType.ROOM, room_id, start_dt, end_dt)
@@ -188,7 +219,7 @@ async def book_room(room_id: int, payload: BookingRequestModel, session: Session
 
 
 @router.post("/domain/desks/book")
-async def book_desk(payload: BookingRequestModel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+async def book_desk(payload: BookingRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
     desk_id = _resource_id_by_name(session, ResourceType.DESK, payload.resource_name, payload.desk_id)
     user_id = _current_user_id(user)
     start_dt, end_dt = _parse_time_range(payload.start_time, payload.end_time)
@@ -208,7 +239,7 @@ async def book_desk(payload: BookingRequestModel, session: Session = Depends(get
 
 
 @router.post("/domain/equipment/reserve")
-async def reserve_equipment(payload: BookingRequestModel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+async def reserve_equipment(payload: BookingRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
     equipment_id = _resource_id_by_name(session, ResourceType.EQUIPMENT, payload.resource_name, payload.equipment_id)
     user_id = _current_user_id(user)
     start_dt, end_dt = _parse_time_range(payload.start_time, payload.end_time)
@@ -228,7 +259,7 @@ async def reserve_equipment(payload: BookingRequestModel, session: Session = Dep
 
 
 @router.post("/domain/parking/book")
-async def book_parking(payload: BookingRequestModel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
+async def book_parking(payload: BookingRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
     spot_id = _resource_id_by_name(session, ResourceType.PARKING, payload.resource_name, payload.parking_spot_id)
     user_id = _current_user_id(user)
     start_dt, end_dt = _parse_time_range(payload.start_time, payload.end_time)
@@ -248,13 +279,6 @@ async def book_parking(payload: BookingRequestModel, session: Session = Depends(
 
 
 # ---------- Leave ----------
-
-
-class LeaveRequest(BaseModel):
-    leave_type: str
-    start_date: str
-    end_date: str
-    reason: str | None = None
 
 
 @router.get("/domain/entitlements/me")
@@ -306,15 +330,8 @@ async def upsert_entitlement(payload: EntitlementUpsert, session: Session = Depe
 
 
 @router.post("/domain/requests")
-class LeaveRequest(BaseModel):
-    leave_type: str
-    start_date: str
-    end_date: str
-    reason: str | None = None
-
-
 async def create_leave_request(
-    payload: LeaveRequest, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
+    payload: LeaveRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
     user_id = _current_user_id(user)
     requested_days = _calc_days(payload.start_date, payload.end_date)
@@ -385,26 +402,11 @@ async def reject_leave_request(
 # ---------- Expense & Travel ----------
 
 
-class Expense(BaseModel):
-    amount: float
-    currency: str
-    date: str
-    category: str
-    project_code: str | None = None
-
-
-class Travel(BaseModel):
-    origin: str
-    destination: str
-    departure_date: str
-    return_date: str | None = None
-    travel_class: str | None = None
-
-
 @router.post("/domain/expenses")
 async def create_expense(
-    expense: Expense, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
+    expense: ExpenseInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
+    _validate_expense(expense)
     data = ExpenseModel(
         user_id=_current_user_id(user),
         amount=expense.amount,
@@ -422,8 +424,23 @@ async def create_expense(
 
 @router.post("/domain/travel-requests")
 async def create_travel(
-    travel: Travel, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
+    travel: TravelInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
+    _validate_travel(travel)
+    dep = date.fromisoformat(travel.departure_date)
+    ret = date.fromisoformat(travel.return_date) if travel.return_date else dep
+    end_expr = func.coalesce(TravelModel.return_date, TravelModel.departure_date)
+    conflict = session.exec(
+        select(TravelModel).where(
+            TravelModel.user_id == _current_user_id(user),
+            TravelModel.status == "approved",
+            TravelModel.departure_date <= ret,
+            end_expr >= dep,
+        )
+    ).first()
+    if conflict:
+        raise HTTPException(409, "You already have an approved travel overlapping these dates")
+
     data = TravelModel(
         user_id=_current_user_id(user),
         origin=travel.origin,
@@ -439,16 +456,11 @@ async def create_travel(
     return {"status": "submitted", "travel": data}
 
 
-class Receipt(BaseModel):
-    url: str | None = None
-    content_type: str | None = None
-
-
 _receipts: dict[str, dict] = {}
 
 
 @router.post("/domain/expenses/{expense_id}/attach-receipt")
-async def attach_receipt(expense_id: int, receipt: Receipt):
+async def attach_receipt(expense_id: int, receipt: ReceiptInput):
     _receipts[str(expense_id)] = receipt.model_dump()
     return {"status": "submitted", "expense_id": expense_id, "receipt": receipt.model_dump()}
 
@@ -467,20 +479,81 @@ async def list_my_travel_requests(session: Session = Depends(get_session), user:
     return {"travel_requests": results}
 
 
+@router.post("/domain/expenses/{expense_id}/approve")
+async def approve_expense(expense_id: int, payload: ExpenseDecision | None = None, session: Session = Depends(get_session)):
+    exp = session.get(ExpenseModel, expense_id)
+    if not exp:
+        raise HTTPException(404, "expense not found")
+    exp.status = "approved"
+    exp.updated_at = datetime.utcnow()
+    session.add(exp)
+    session.commit()
+    session.refresh(exp)
+    return {"status": "approved", "expense": exp, "reason": payload.reason if payload else None}
+
+
+@router.post("/domain/expenses/{expense_id}/reject")
+async def reject_expense(expense_id: int, payload: ExpenseDecision | None = None, session: Session = Depends(get_session)):
+    exp = session.get(ExpenseModel, expense_id)
+    if not exp:
+        raise HTTPException(404, "expense not found")
+    exp.status = "rejected"
+    exp.updated_at = datetime.utcnow()
+    exp.project_code = exp.project_code  # no-op to silence lint
+    session.add(exp)
+    session.commit()
+    session.refresh(exp)
+    return {"status": "rejected", "expense": exp, "reason": payload.reason if payload else None}
+
+
+@router.post("/domain/travel-requests/{travel_id}/approve")
+async def approve_travel(travel_id: int, payload: TravelDecision | None = None, session: Session = Depends(get_session)):
+    tr = session.get(TravelModel, travel_id)
+    if not tr:
+        raise HTTPException(404, "travel request not found")
+    # check conflicts with already approved travel for this user
+    dep = tr.departure_date
+    ret = tr.return_date or tr.departure_date
+    end_expr = func.coalesce(TravelModel.return_date, TravelModel.departure_date)
+    conflict = session.exec(
+        select(TravelModel).where(
+            TravelModel.user_id == tr.user_id,
+            TravelModel.status == "approved",
+            TravelModel.id != tr.id,
+            TravelModel.departure_date <= ret,
+            end_expr >= dep,
+        )
+    ).first()
+    if conflict:
+        raise HTTPException(409, "This user already has approved travel overlapping these dates")
+
+    tr.status = "approved"
+    tr.updated_at = datetime.utcnow()
+    session.add(tr)
+    session.commit()
+    session.refresh(tr)
+    return {"status": "approved", "travel": tr, "reason": payload.reason if payload else None}
+
+
+@router.post("/domain/travel-requests/{travel_id}/reject")
+async def reject_travel(travel_id: int, payload: TravelDecision | None = None, session: Session = Depends(get_session)):
+    tr = session.get(TravelModel, travel_id)
+    if not tr:
+        raise HTTPException(404, "travel request not found")
+    tr.status = "rejected"
+    tr.updated_at = datetime.utcnow()
+    session.add(tr)
+    session.commit()
+    session.refresh(tr)
+    return {"status": "rejected", "travel": tr, "reason": payload.reason if payload else None}
+
+
 # ---------- Tickets ----------
-
-
-class Ticket(BaseModel):
-    type: str
-    category: str | None = None
-    description: str
-    location: str | None = None
-    priority: str | None = None
 
 
 @router.post("/domain/tickets")
 async def create_ticket(
-    ticket: Ticket, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
+    ticket: TicketInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
     if ticket.type not in {"it", "facilities"}:
         raise HTTPException(400, "type must be 'it' or 'facilities'")
@@ -514,14 +587,8 @@ async def list_my_tickets(session: Session = Depends(get_session), user: UserCon
     return {"tickets": results}
 
 
-class TicketUpdate(BaseModel):
-    status: str | None = None
-    assignee: str | None = None
-    comment: str | None = None
-
-
 @router.patch("/domain/tickets/{ticket_id}")
-async def update_ticket(ticket_id: int, payload: TicketUpdate, session: Session = Depends(get_session)):
+async def update_ticket(ticket_id: int, payload: TicketUpdateInput, session: Session = Depends(get_session)):
     ticket = session.get(TicketModel, ticket_id)
     if not ticket:
         raise HTTPException(404, "ticket not found")
@@ -537,15 +604,9 @@ async def update_ticket(ticket_id: int, payload: TicketUpdate, session: Session 
 # ---------- Access ----------
 
 
-class AccessRequest(BaseModel):
-    resource: str
-    requested_role: str
-    justification: str
-
-
 @router.post("/domain/access-requests")
 async def create_access_request(
-    payload: AccessRequest, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
+    payload: AccessRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
     data = AccessRequestModel(
         user_id=_current_user_id(user),
