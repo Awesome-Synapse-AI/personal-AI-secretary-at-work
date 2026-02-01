@@ -1,3 +1,4 @@
+import os
 from datetime import date, datetime
 from typing import Optional
 
@@ -37,6 +38,9 @@ from app.models import (
     RequestedRole,
     TicketStatus,
     TicketType,
+    CalendarEvent,
+    CalendarEventInput,
+    EventSource,
 )
 from app.schemas.chat import ChatRequest, ChatResponse, UserContext
 from app.utils import iter_tokens
@@ -194,6 +198,67 @@ def _calc_days(start: str, end: str) -> float:
     return (e - s).days + 1
 
 
+def _google_calendar_service():
+    enabled = os.getenv("GOOGLE_CALENDAR_ENABLED", "").lower() in {"1", "true", "yes"}
+    creds_path = os.getenv("GOOGLE_CALENDAR_CREDENTIALS")
+    calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
+    if not (enabled and creds_path and calendar_id):
+        return None, None
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+    except Exception:
+        return None, None
+    try:
+        scopes = ["https://www.googleapis.com/auth/calendar"]
+        creds = service_account.Credentials.from_service_account_file(creds_path, scopes=scopes)
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        return service, calendar_id
+    except Exception:
+        return None, None
+
+
+def _create_event(
+    session: Session,
+    user_id: str,
+    title: str,
+    start_time: datetime,
+    end_time: datetime,
+    source_type: EventSource,
+    source_id: int | None,
+    status: str = "busy",
+) -> CalendarEvent:
+    event = CalendarEvent(
+        user_id=user_id,
+        title=title,
+        start_time=start_time,
+        end_time=end_time,
+        source_type=source_type,
+        source_id=source_id,
+        status=status,
+    )
+    session.add(event)
+    session.commit()
+    session.refresh(event)
+    service, calendar_id = _google_calendar_service()
+    if service and calendar_id:
+        body = {
+            "summary": title,
+            "start": {"dateTime": start_time.isoformat()},
+            "end": {"dateTime": end_time.isoformat()},
+            "description": f"{source_type.value} request #{source_id}" if source_id else title,
+        }
+        try:
+            created = service.events().insert(calendarId=calendar_id, body=body, sendUpdates="none").execute()
+            event.google_event_id = created.get("id")
+            session.add(event)
+            session.commit()
+            session.refresh(event)
+        except Exception:
+            # Silently ignore Google Calendar failures to avoid blocking core flow
+            pass
+    return event
+
 # ---------- Workspace ----------
 
 
@@ -219,6 +284,15 @@ async def book_room(room_id: int, payload: BookingRequestInput, session: Session
     session.add(booking)
     session.commit()
     session.refresh(booking)
+    _create_event(
+        session,
+        user_id,
+        title=f"Room booking ({room_id})",
+        start_time=start_dt,
+        end_time=end_dt,
+        source_type=EventSource.WORKSPACE,
+        source_id=booking.id,
+    )
     return {"status": "submitted", "booking": booking}
 
 
@@ -239,6 +313,15 @@ async def book_desk(payload: BookingRequestInput, session: Session = Depends(get
     session.add(booking)
     session.commit()
     session.refresh(booking)
+    _create_event(
+        session,
+        user_id,
+        title=f"Desk booking ({desk_id})",
+        start_time=start_dt,
+        end_time=end_dt,
+        source_type=EventSource.WORKSPACE,
+        source_id=booking.id,
+    )
     return {"status": "submitted", "booking": booking}
 
 
@@ -259,6 +342,15 @@ async def reserve_equipment(payload: BookingRequestInput, session: Session = Dep
     session.add(booking)
     session.commit()
     session.refresh(booking)
+    _create_event(
+        session,
+        user_id,
+        title=f"Equipment booking ({equipment_id})",
+        start_time=start_dt,
+        end_time=end_dt,
+        source_type=EventSource.WORKSPACE,
+        source_id=booking.id,
+    )
     return {"status": "submitted", "booking": booking}
 
 
@@ -279,6 +371,15 @@ async def book_parking(payload: BookingRequestInput, session: Session = Depends(
     session.add(booking)
     session.commit()
     session.refresh(booking)
+    _create_event(
+        session,
+        user_id,
+        title=f"Parking booking ({spot_id})",
+        start_time=start_dt,
+        end_time=end_dt,
+        source_type=EventSource.WORKSPACE,
+        source_id=booking.id,
+    )
     return {"status": "submitted", "booking": booking}
 
 
@@ -360,6 +461,15 @@ async def create_leave_request(
     session.add(ent)
     session.commit()
     session.refresh(lr)
+    _create_event(
+        session,
+        user_id,
+        title=f"Leave: {payload.leave_type}",
+        start_time=datetime.combine(date.fromisoformat(payload.start_date), datetime.min.time()),
+        end_time=datetime.combine(date.fromisoformat(payload.end_date), datetime.max.time()),
+        source_type=EventSource.LEAVE,
+        source_id=lr.id,
+    )
     return {"status": "submitted", "request": lr}
 
 
@@ -456,6 +566,15 @@ async def create_travel(
     session.add(data)
     session.commit()
     session.refresh(data)
+    _create_event(
+        session,
+        _current_user_id(user),
+        title=f"Travel: {travel.origin} -> {travel.destination}",
+        start_time=datetime.combine(date.fromisoformat(travel.departure_date), datetime.min.time()),
+        end_time=datetime.combine(date.fromisoformat(travel.return_date) if travel.return_date else date.fromisoformat(travel.departure_date), datetime.max.time()),
+        source_type=EventSource.TRAVEL,
+        source_id=data.id,
+    )
     return {"status": "submitted", "travel": data}
 
 
@@ -703,8 +822,27 @@ async def reject_access_request(
 
 
 @router.get("/domain/availability")
-async def availability(user: str | None = None):
-    return {"user": user, "slots": []}
+async def availability(
+    user: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    session: Session = Depends(get_session),
+    current: UserContext = Depends(get_current_user),
+):
+    user_id = user or _current_user_id(current)
+    try:
+        start_dt = dateparser.parse(start) if start else datetime.utcnow()
+        end_dt = dateparser.parse(end) if end else start_dt.replace(hour=23, minute=59, second=59)  # same day default
+    except Exception:
+        raise HTTPException(400, "Invalid start/end for availability")
+    events = session.exec(
+        select(CalendarEvent).where(
+            CalendarEvent.user_id == user_id,
+            CalendarEvent.start_time < end_dt,
+            CalendarEvent.end_time > start_dt,
+        ).order_by(CalendarEvent.start_time)
+    ).all()
+    return {"user": user_id, "events": events}
 
 
 # ---------- Chat / Health ----------

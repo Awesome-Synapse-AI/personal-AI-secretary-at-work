@@ -83,6 +83,13 @@ class AccessStatus(str, Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
 
+
+class EventSource(str, Enum):
+    LEAVE = "leave"
+    TRAVEL = "travel"
+    WORKSPACE = "workspace"
+    GENERIC = "generic"
+
 class AccessRequest(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: str
@@ -92,6 +99,20 @@ class AccessRequest(SQLModel, table=True):
     status: AccessStatus = Field(default=AccessStatus.PENDING)
     approver_id: Optional[str] = None
     reject_reason: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CalendarEvent(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: str
+    title: str
+    start_time: datetime
+    end_time: datetime
+    source_type: EventSource = Field(default=EventSource.GENERIC, index=True)
+    source_id: Optional[int] = Field(default=None, index=True)
+    status: str = "busy"
+    google_event_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -237,3 +258,11 @@ class TicketInput(BaseModel):
     description: str
     location: str | None = None
     priority: str | None = None
+
+
+class CalendarEventInput(BaseModel):
+    title: str
+    start_time: datetime
+    end_time: datetime
+    source_type: EventSource = EventSource.GENERIC
+    source_id: int | None = None

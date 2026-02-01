@@ -11,3 +11,6 @@ structlog>=24.1,<25
 sqlmodel>=0.0.16
 psycopg2-binary>=2.9,<3
 python-dateutil>=2.9,<3
+google-api-python-client>=2.125.0,<3
+google-auth>=2.28.0,<3
+google-auth-httplib2>=0.2.0,<1
