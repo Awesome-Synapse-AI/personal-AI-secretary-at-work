@@ -20,3 +20,5 @@ python-multipart>=0.0.7
 boto3>=1.34,<2
 pytesseract>=0.3.10,<1
 Pillow>=10.2,<11
+sentence-transformers>=5.2,<6
+torch>=2.3,<2.6

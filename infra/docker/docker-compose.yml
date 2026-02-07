@@ -130,11 +130,6 @@ services:
       - "-c"
       - "ollama serve > /tmp/ollama.log 2>&1 & sleep 5 && ollama pull qwen3:0.6b && tail -f /tmp/ollama.log"
 
-  embedding-svc:
-    image: python:3.11-slim
-    profiles: ["embedding"]
-    command: ["sleep", "infinity"]
-
 
 volumes:
   postgres_data:

@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     qdrant_collection_policy_hr: str = "policy_hr"
     qdrant_collection_policy_it: str = "policy_it"
     qdrant_collection_policy_travel_expense: str = "policy_travel_expense"
-    embedding_url: str = "http://embedding-svc:8000/embed"
+    embedding_model_name: str = "BAAI/bge-m3"
+    embedding_device: str = "cpu"  # set to "cuda" if GPU available
+    embedding_normalize: bool = True
 
     upload_dir: str = "./data/uploads"
 

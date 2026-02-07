@@ -275,20 +275,35 @@ def _create_event(
 # ---------- Document & Policy Search ----------
 
 
-def _embedding_url() -> str:
-    return settings.embedding_url
+_embedding_model_cache = None
+
+
+def _embedding_model():
+    from sentence_transformers import SentenceTransformer  # lazy import
+
+    global _embedding_model_cache
+    if _embedding_model_cache is None:
+        _embedding_model_cache = SentenceTransformer(
+            settings.embedding_model_name,
+            trust_remote_code=True,
+            device=settings.embedding_device,
+        )
+    return _embedding_model_cache
 
 
 async def _embed_texts(texts: List[str]) -> list[list[float]]:
     if not texts:
         return []
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(_embedding_url(), json={"texts": texts})
-        resp.raise_for_status()
-        data = resp.json()
-    vectors = data.get("vectors", [])
-    if not isinstance(vectors, list):
-        raise HTTPException(502, "Invalid embedding service response")
+    # run synchronous encoding in thread to avoid blocking event loop
+    loop = asyncio.get_running_loop()
+    model = _embedding_model()
+    vectors = await loop.run_in_executor(
+        None,
+        lambda: model.encode(
+            texts,
+            normalize_embeddings=settings.embedding_normalize,
+        ).tolist(),
+    )
     return vectors
 
 
