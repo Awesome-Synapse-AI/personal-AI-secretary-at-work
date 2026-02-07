@@ -343,6 +343,7 @@ async def _call_tool(
             "type": action_type,
             "status": result.get("status", "submitted"),
             "payload": payload,
+            "result": result.get("result"),
             "error": result.get("error"),
         }
     except Exception as exc:  # pragma: no cover - network errors
