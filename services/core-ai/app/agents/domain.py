@@ -82,7 +82,7 @@ async def domain_node(state: ChatState) -> ChatState:
     elif domain == "workspace":
         response, pending, actions = await _handle_workspace(message, pending, state)
     elif domain == "doc_qa":
-        response = "Upload a document and ask your question."
+        response, pending, actions = await _handle_doc_qa(message, pending, state)
     else:
         response = _domain_intro(domain)
 
@@ -208,6 +208,36 @@ async def _handle_workspace(
         return _workspace_success(pending), None, [action]
 
     return _domain_intro("workspace"), pending, []
+
+
+async def _handle_doc_qa(
+    message: str, pending: dict[str, Any] | None, state: ChatState
+) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
+    # Simple doc search against indexed documents
+    if not message.strip():
+        return "Upload a document and ask your question.", pending, []
+
+    action = await _call_tool(
+        state,
+        "doc_qa",
+        "/documents/search",
+        {"query": message, "top_k": 3},
+        "doc_search",
+    )
+    if action.get("status") == "failed":
+        return f"I couldn't search documents: {action.get('error')}", pending, [action]
+
+    results = action.get("result", {}).get("matches") if action.get("result") else None
+    if not results:
+        return "I searched your documents but found no relevant matches.", pending, [action]
+
+    lines = ["Here are the most relevant document snippets:"]
+    for idx, hit in enumerate(results, 1):
+        title = hit.get("title") or "Untitled"
+        score = round(float(hit.get("score", 0)), 3)
+        path = hit.get("path")
+        lines.append(f"{idx}. {title} (score {score}) - {path}")
+    return "\n".join(lines), pending, [action]
 
 
 async def _submit_leave_request(pending: dict[str, Any], state: ChatState) -> dict[str, Any]:

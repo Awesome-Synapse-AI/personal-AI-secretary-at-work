@@ -23,11 +23,8 @@ class ToolRunner:
         try:
             response = await self._client.request(method, url, json=payload, headers=headers)
             response.raise_for_status()
-            if response.content:
-                data = response.json()
-                if isinstance(data, dict):
-                    return data
-            return {"status": "ok"}
+            result = response.json() if response.content else {}
+            return {"status": "ok", "result": result}
         except Exception as exc:
             error_msg = ""
             if hasattr(exc, "response") and getattr(exc, "response") is not None:

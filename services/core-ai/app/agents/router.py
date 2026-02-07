@@ -39,6 +39,8 @@ def _heuristic_route(message: str) -> tuple[str, str]:
         return "ops", "normal"
     if any(word in lower for word in ["access", "password", "login", "ticket", "it"]):
         return "it", "access"
+    if any(word in lower for word in ["policy", "document", "pdf", "handbook", "guide", "search docs", "upload"]):
+        return "doc_qa", "normal"
     return "generic", "normal"
 
 

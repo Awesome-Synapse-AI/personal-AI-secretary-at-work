@@ -133,6 +133,27 @@ class CalendarEvent(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class Document(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    owner: str
+    scope: str = "public"
+    source: str | None = None
+    title: str
+    path: str
+    mime_type: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class DocumentChunk(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    document_id: int
+    content: str
+    embedding: bytes | None = None
+    chunk_index: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 # Workspace resources
 
 
@@ -267,3 +288,10 @@ class CalendarEventInput(BaseModel):
     end_time: datetime
     source_type: EventSource = EventSource.GENERIC
     source_id: int | None = None
+
+
+class DocumentSearchInput(BaseModel):
+    query: str
+    top_k: int = 5
+    owner: str | None = None
+    scope: str | None = None

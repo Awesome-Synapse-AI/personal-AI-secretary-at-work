@@ -1,11 +1,15 @@
 import os
+import uuid
+from pathlib import Path
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from sqlmodel import Session, select
 from sqlalchemy import func
 from dateutil import parser as dateparser
+import httpx
+import numpy as np
 
 from app.auth import get_current_user, get_user_from_token
 from app.chat_service import handle_chat
@@ -41,6 +45,9 @@ from app.models import (
     CalendarEvent,
     CalendarEventInput,
     EventSource,
+    Document,
+    DocumentChunk,
+    DocumentSearchInput,
 )
 from app.schemas.chat import ChatRequest, ChatResponse, UserContext
 from app.utils import iter_tokens, utcnow
@@ -258,6 +265,65 @@ def _create_event(
             # Silently ignore Google Calendar failures to avoid blocking core flow
             pass
     return event
+
+
+# ---------- Document & Policy Search ----------
+
+
+def _embedding_url() -> str:
+    return os.getenv("EMBEDDING_URL", "http://embedding-svc:8000/embed")
+
+
+async def _embed_texts(texts: List[str]) -> list[list[float]]:
+    if not texts:
+        return []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(_embedding_url(), json={"texts": texts})
+        resp.raise_for_status()
+        data = resp.json()
+    vectors = data.get("vectors", [])
+    if not isinstance(vectors, list):
+        raise HTTPException(502, "Invalid embedding service response")
+    return vectors
+
+
+def _serialize_vec(vec: list[float]) -> bytes:
+    return np.array(vec, dtype=np.float32).tobytes()
+
+
+def _deserialize_vec(blob: bytes) -> list[float]:
+    return np.frombuffer(blob, dtype=np.float32).tolist()
+
+
+def _qdrant_client():
+    host = os.getenv("QDRANT_HOST")
+    if not host:
+        return None
+    from qdrant_client import QdrantClient
+
+    return QdrantClient(
+        host=host,
+        port=int(os.getenv("QDRANT_PORT", 6333)),
+        api_key=os.getenv("QDRANT_API_KEY"),
+    )
+
+
+def _ensure_collection(client, size: int):
+    from qdrant_client.http import models as qmodels
+
+    collection = os.getenv("QDRANT_COLLECTION", "documents")
+    collections = client.get_collections().collections
+    if not any(c.name == collection for c in collections):
+        client.create_collection(
+            collection_name=collection,
+            vectors_config=qmodels.VectorParams(size=size, distance=qmodels.Distance.COSINE),
+        )
+
+
+def _upload_dir() -> Path:
+    p = Path(os.getenv("UPLOAD_DIR", "./data/uploads"))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 # ---------- Workspace ----------
 
@@ -843,6 +909,137 @@ async def availability(
         ).order_by(CalendarEvent.start_time)
     ).all()
     return {"user": user_id, "events": events}
+
+
+# ---------- Documents ----------
+
+
+@router.post("/documents/upload")
+async def upload_document(
+    file: bytes = File(...),  # raw bytes
+    filename: str = Form(...),
+    content_type: str | None = Form(None),
+    owner: str = Form("system"),
+    scope: str = Form("public"),
+    source: str = Form("manual"),
+    session: Session = Depends(get_session),
+):
+    name = f"{uuid.uuid4()}_{filename}"
+    path = _upload_dir() / name
+    with open(path, "wb") as f:
+        f.write(file)
+
+    text_content = file.decode(errors="ignore") if content_type and "text" in content_type else ""
+    doc = Document(
+        owner=owner,
+        scope=scope,
+        source=source,
+        title=filename,
+        path=str(path),
+        mime_type=content_type,
+    )
+    session.add(doc)
+    session.commit()
+    session.refresh(doc)
+
+    chunks = [text_content] if text_content else []
+    vectors = await _embed_texts(chunks) if chunks else []
+
+    client = _qdrant_client()
+    collection = os.getenv("QDRANT_COLLECTION", "documents")
+    if client and vectors:
+        _ensure_collection(client, len(vectors[0]))
+        payloads = [{"document_id": doc.id, "chunk_index": idx, "owner": owner, "scope": scope} for idx, _ in enumerate(vectors)]
+        from qdrant_client.http import models as qmodels
+
+        points = [
+            qmodels.PointStruct(id=None, vector=vectors[i], payload=payloads[i])
+            for i in range(len(vectors))
+        ]
+        client.upsert(collection_name=collection, wait=True, points=points)
+
+    for idx, chunk in enumerate(chunks):
+        session.add(
+            DocumentChunk(
+                document_id=doc.id,
+                content=chunk,
+                embedding=_serialize_vec(vectors[idx]) if vectors else None,
+                chunk_index=idx,
+            )
+        )
+    session.commit()
+    return {"status": "submitted", "document_id": doc.id, "message": "Document uploaded and indexed"}
+
+
+@router.post("/documents/search")
+async def search_documents(payload: DocumentSearchInput, session: Session = Depends(get_session)):
+    vectors = await _embed_texts([payload.query])
+    if not vectors:
+        raise HTTPException(502, "Embedding service unavailable")
+    query_vec = vectors[0]
+    results: list[dict] = []
+
+    client = _qdrant_client()
+    collection = os.getenv("QDRANT_COLLECTION", "documents")
+    if client:
+        _ensure_collection(client, len(query_vec))
+        hits = client.search(
+            collection_name=collection,
+            query_vector=query_vec,
+            limit=payload.top_k,
+        )
+        doc_ids = [hit.payload.get("document_id") for hit in hits]
+        if doc_ids:
+            rows = session.exec(select(Document).where(Document.id.in_(doc_ids))).all()
+            id_map = {d.id: d for d in rows}
+            for hit in hits:
+                did = hit.payload.get("document_id")
+                doc = id_map.get(did)
+                if not doc:
+                    continue
+                if payload.owner and doc.owner != payload.owner:
+                    continue
+                if payload.scope and doc.scope != payload.scope:
+                    continue
+                results.append(
+                    {
+                        "document_id": doc.id,
+                        "title": doc.title,
+                        "score": hit.score,
+                        "chunk_index": hit.payload.get("chunk_index"),
+                        "path": doc.path,
+                    }
+                )
+        return {"matches": results}
+
+    # fallback to local embeddings if Qdrant not configured
+    chunks = session.exec(select(DocumentChunk)).all()
+    def dot(a, b): return sum(x * y for x, y in zip(a, b))
+    scored = []
+    for ch in chunks:
+        if not ch.embedding:
+            continue
+        emb = _deserialize_vec(ch.embedding)
+        scored.append((dot(emb, query_vec), ch))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    for score, ch in scored[: payload.top_k]:
+        doc = session.get(Document, ch.document_id)
+        if not doc:
+            continue
+        if payload.owner and doc.owner != payload.owner:
+            continue
+        if payload.scope and doc.scope != payload.scope:
+            continue
+        results.append(
+            {
+                "document_id": doc.id,
+                "title": doc.title,
+                "score": score,
+                "chunk_index": ch.chunk_index,
+                "path": doc.path,
+            }
+        )
+    return {"matches": results}
 
 
 # ---------- Chat / Health ----------
