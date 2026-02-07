@@ -110,6 +110,20 @@ services:
       - llm
       # domain endpoints are co-hosted in core-ai
 
+  frontend:
+    build:
+      context: ../../frontend/web
+    environment:
+      NEXT_PUBLIC_API_BASE: http://core-ai:8000/api/v1
+      NEXT_PUBLIC_WS_BASE: ws://core-ai:8000/api/v1
+      NEXT_PUBLIC_APPROVALS_WS: ""
+      NEXT_PUBLIC_TENANT_ID: default
+      NEXT_PUBLIC_DEMO_USER: demo-user
+    ports:
+      - "3000:3000"
+    depends_on:
+      - core-ai
+
   llm:
     image: ollama/ollama:latest
     ports:

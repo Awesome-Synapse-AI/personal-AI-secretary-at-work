@@ -1,0 +1,38 @@
+{
+  "name": "personal-ai-secretary-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0 --port 3000",
+    "build": "next build",
+    "start": "next start --hostname 0.0.0.0 --port 3000",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@headlessui/react": "^1.7.18",
+    "@tailwindcss/forms": "^0.5.7",
+    "clsx": "^2.1.0",
+    "date-fns": "^3.4.0",
+    "framer-motion": "^11.0.3",
+    "lucide-react": "^0.365.0",
+    "next": "15.0.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "swr": "^2.2.4",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@types/react": "^18.2.73",
+    "@types/react-dom": "^18.2.24",
+    "autoprefixer": "^10.4.18",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "15.0.0",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.3",
+    "typescript": "^5.4.3"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  }
+}
