@@ -1,9 +1,11 @@
 from datetime import date, datetime
-from typing import Optional
 from enum import Enum
+from typing import Optional
 
-from sqlmodel import Field, SQLModel
 from pydantic import BaseModel
+from sqlalchemy import JSON, Column
+from sqlmodel import Field, SQLModel
+
 from app.utils import utcnow
 
 
@@ -117,6 +119,16 @@ class AccessRequest(SQLModel, table=True):
     reject_reason: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AuditLog(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    actor_id: str
+    action: str
+    target_type: str
+    target_id: str | None = None
+    details: dict | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class CalendarEvent(SQLModel, table=True):

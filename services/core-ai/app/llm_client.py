@@ -1,26 +1,24 @@
 import json
-import logging
+import time
 
 import httpx
+import structlog
+from langsmith import traceable
 
 from app.config import settings
+from app.observability import record_llm_error, record_llm_timing
 
-logger = logging.getLogger(__name__)
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger = structlog.get_logger("llm_client")
 
 
+@traceable(name="call_llm_json", run_type="llm")
 async def call_llm_json(system_prompt: str, user_message: str, max_tokens: int) -> dict | None:
     # Request JSON-formatted output to improve parsing reliability with Ollama.
     content, raw = await _call_llm(
         system_prompt, user_message, max_tokens, enforce_json=True, stream=False
     )
     if raw is not None:
-        logger.info("LLM raw response (truncated): %s", _truncate(json.dumps(raw, default=str), 600))
-        print("LLM raw response (truncated):", _truncate(json.dumps(raw, default=str), 600), flush=True)
+        logger.info("llm_response_raw", raw=_truncate(json.dumps(raw, default=str), 600))
     payload = _parse_json_payload(content)
     if payload is not None:
         return payload
@@ -42,15 +40,7 @@ async def call_llm_json(system_prompt: str, user_message: str, max_tokens: int) 
         max_tokens=max_tokens,
     )
     if repaired_raw is not None:
-        logger.info(
-            "LLM repaired raw response (truncated): %s",
-            _truncate(json.dumps(repaired_raw, default=str), 600),
-        )
-        print(
-            "LLM repaired raw response (truncated):",
-            _truncate(json.dumps(repaired_raw, default=str), 600),
-            flush=True,
-        )
+        logger.info("llm_response_repaired_raw", raw=_truncate(json.dumps(repaired_raw, default=str), 600))
     return _parse_json_payload(repaired)
 
 
@@ -106,6 +96,7 @@ def _extract_json_object(text: str) -> str | None:
     return None
 
 
+@traceable(name="llm_http_call", run_type="llm")
 async def _call_llm(
     system_prompt: str,
     user_message: str,
@@ -135,14 +126,19 @@ async def _call_llm(
     elif stream is not None:
         payload["stream"] = bool(stream)
 
+    start = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
     except Exception as exc:
-        logger.exception("LLM request failed: %s", exc)
+        record_llm_error(settings.llm_model, exc.__class__.__name__)
+        logger.exception("llm_request_failed", error=str(exc))
         return None, None
+    finally:
+        duration = time.perf_counter() - start
+        record_llm_timing(settings.llm_model, duration, bool(stream))
 
     choice = data.get("choices", [{}])[0]
     message = choice.get("message", {}) or {}
@@ -158,7 +154,14 @@ async def _call_llm(
         extracted = _extract_json_object(json.dumps(choice))
         raw_content = extracted or ""
 
-    return (raw_content.strip() if raw_content else None), data
+    cleaned = raw_content.strip() if raw_content else None
+    logger.info(
+        "llm_request_succeeded",
+        model=settings.llm_model,
+        streaming=bool(stream),
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+    )
+    return cleaned, data
 
 
 def _truncate(text: str, length: int) -> str:

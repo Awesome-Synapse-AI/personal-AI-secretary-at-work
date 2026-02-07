@@ -1,14 +1,10 @@
-import logging
+import structlog
+from langsmith import traceable
 
 from app.llm_client import call_llm_json
 from app.state import ChatState
 
-logger = logging.getLogger(__name__)
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger = structlog.get_logger("router_agent")
 
 DOMAIN_VALUES = {"workspace", "hr", "ops", "it", "doc_qa", "generic"}
 SENSITIVITY_VALUES = {"normal", "hr_personal", "salary", "access"}
@@ -44,14 +40,13 @@ def _heuristic_route(message: str) -> tuple[str, str]:
     return "generic", "normal"
 
 
+@traceable(name="router_llm_classify", run_type="chain")
 async def _classify_with_llm(message: str) -> tuple[str, str] | None:
     payload = await call_llm_json(LLM_SYSTEM_PROMPT, message, max_tokens=64)
     if not payload:
-        logger.warning("Router LLM returned no payload")
-        print("Router LLM returned no payload", flush=True)
+        logger.warning("router_llm_empty_payload")
         return None
-    logger.info("Router LLM payload: %s", payload)
-    print(f"Router LLM payload: {payload}", flush=True)
+    logger.info("router_llm_payload", payload=payload)
     return _parse_llm_output(payload)
 
 
@@ -59,6 +54,7 @@ def _add_event(state: ChatState, event_type: str, data: dict | None = None) -> N
     state.setdefault("events", []).append({"type": event_type, "data": data or {}})
 
 
+@traceable(name="router_node", run_type="chain")
 async def router_node(state: ChatState) -> ChatState:
     _add_event(state, "agent_started", {"agent": "RouterAgent"})
 

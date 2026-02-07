@@ -22,3 +22,4 @@ pytesseract>=0.3.10,<1
 Pillow>=10.2,<11
 sentence-transformers>=5.2,<6
 torch>=2.3,<2.6
+prometheus_client>=0.20,<1

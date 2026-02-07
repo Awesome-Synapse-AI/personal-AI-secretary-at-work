@@ -15,7 +15,8 @@ import boto3
 import pytesseract
 from PIL import Image
 
-from app.auth import get_current_user, get_user_from_token
+from app.auth import get_current_user, get_user_from_token, require_roles
+from app.audit import record_audit_log
 from app.chat_service import handle_chat
 from app.db import get_session
 from app.config import settings
@@ -538,7 +539,9 @@ async def entitlements_user(
     leave_type: str = "annual",
     month: int | None = None,
     session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
 ):
+    require_roles(user, {"hr_approver", "manager", "system_admin"}, "view_entitlements")
     year = year or utcnow().year
     ent = _get_entitlement(session, user_id, year, leave_type, month)
     available = ent.days_available if ent else 0.0
@@ -546,7 +549,12 @@ async def entitlements_user(
 
 
 @router.post("/domain/entitlements")
-async def upsert_entitlement(payload: EntitlementUpsert, session: Session = Depends(get_session)):
+async def upsert_entitlement(
+    payload: EntitlementUpsert,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"hr_approver", "manager", "system_admin"}, "manage_entitlements")
     ent = _get_entitlement(session, payload.user_id, payload.year, payload.leave_type, payload.month)
     if ent:
         ent.days_available = payload.days_available
@@ -614,6 +622,7 @@ async def list_my_requests(session: Session = Depends(get_session), user: UserCo
 async def approve_leave_request(
     request_id: int, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
+    require_roles(user, {"hr_approver", "manager", "system_admin"}, "approve_leave")
     lr = session.get(LeaveRequestModel, request_id)
     if not lr:
         raise HTTPException(404, "request not found")
@@ -621,6 +630,13 @@ async def approve_leave_request(
     lr.approver_id = _current_user_id(user)
     lr.updated_at = utcnow()
     session.add(lr)
+    record_audit_log(
+        session,
+        actor_id=_current_user_id(user),
+        action="leave_request_approved",
+        target_type="leave_request",
+        target_id=lr.id,
+    )
     session.commit()
     session.refresh(lr)
     return {"status": "approved", "request": lr}
@@ -630,6 +646,7 @@ async def approve_leave_request(
 async def reject_leave_request(
     request_id: int, reason: str | None = None, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
+    require_roles(user, {"hr_approver", "manager", "system_admin"}, "reject_leave")
     lr = session.get(LeaveRequestModel, request_id)
     if not lr:
         raise HTTPException(404, "request not found")
@@ -638,6 +655,14 @@ async def reject_leave_request(
     lr.approver_id = _current_user_id(user)
     lr.updated_at = utcnow()
     session.add(lr)
+    record_audit_log(
+        session,
+        actor_id=_current_user_id(user),
+        action="leave_request_rejected",
+        target_type="leave_request",
+        target_id=lr.id,
+        details={"reason": reason},
+    )
     session.commit()
     session.refresh(lr)
     return {"status": "rejected", "request": lr}
@@ -732,20 +757,40 @@ async def list_my_travel_requests(session: Session = Depends(get_session), user:
 
 
 @router.post("/domain/expenses/{expense_id}/approve")
-async def approve_expense(expense_id: int, payload: ExpenseDecision | None = None, session: Session = Depends(get_session)):
+async def approve_expense(
+    expense_id: int,
+    payload: ExpenseDecision | None = None,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"admin_approver", "manager", "system_admin"}, "approve_expense")
     exp = session.get(ExpenseModel, expense_id)
     if not exp:
         raise HTTPException(404, "expense not found")
     exp.status = "approved"
     exp.updated_at = utcnow()
     session.add(exp)
+    record_audit_log(
+        session,
+        actor_id=_current_user_id(user),
+        action="expense_approved",
+        target_type="expense",
+        target_id=exp.id,
+        details={"reason": payload.reason if payload else None},
+    )
     session.commit()
     session.refresh(exp)
     return {"status": "approved", "expense": exp, "reason": payload.reason if payload else None}
 
 
 @router.post("/domain/expenses/{expense_id}/reject")
-async def reject_expense(expense_id: int, payload: ExpenseDecision | None = None, session: Session = Depends(get_session)):
+async def reject_expense(
+    expense_id: int,
+    payload: ExpenseDecision | None = None,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"admin_approver", "manager", "system_admin"}, "reject_expense")
     exp = session.get(ExpenseModel, expense_id)
     if not exp:
         raise HTTPException(404, "expense not found")
@@ -753,13 +798,27 @@ async def reject_expense(expense_id: int, payload: ExpenseDecision | None = None
     exp.updated_at = utcnow()
     exp.project_code = exp.project_code  # no-op to silence lint
     session.add(exp)
+    record_audit_log(
+        session,
+        actor_id=_current_user_id(user),
+        action="expense_rejected",
+        target_type="expense",
+        target_id=exp.id,
+        details={"reason": payload.reason if payload else None},
+    )
     session.commit()
     session.refresh(exp)
     return {"status": "rejected", "expense": exp, "reason": payload.reason if payload else None}
 
 
 @router.post("/domain/travel-requests/{travel_id}/approve")
-async def approve_travel(travel_id: int, payload: TravelDecision | None = None, session: Session = Depends(get_session)):
+async def approve_travel(
+    travel_id: int,
+    payload: TravelDecision | None = None,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"admin_approver", "manager", "system_admin"}, "approve_travel")
     tr = session.get(TravelModel, travel_id)
     if not tr:
         raise HTTPException(404, "travel request not found")
@@ -781,19 +840,41 @@ async def approve_travel(travel_id: int, payload: TravelDecision | None = None, 
     tr.status = "approved"
     tr.updated_at = utcnow()
     session.add(tr)
+    record_audit_log(
+        session,
+        actor_id=_current_user_id(user),
+        action="travel_request_approved",
+        target_type="travel_request",
+        target_id=tr.id,
+        details={"reason": payload.reason if payload else None},
+    )
     session.commit()
     session.refresh(tr)
     return {"status": "approved", "travel": tr.model_dump(mode="python"), "reason": payload.reason if payload else None}
 
 
 @router.post("/domain/travel-requests/{travel_id}/reject")
-async def reject_travel(travel_id: int, payload: TravelDecision | None = None, session: Session = Depends(get_session)):
+async def reject_travel(
+    travel_id: int,
+    payload: TravelDecision | None = None,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"admin_approver", "manager", "system_admin"}, "reject_travel")
     tr = session.get(TravelModel, travel_id)
     if not tr:
         raise HTTPException(404, "travel request not found")
     tr.status = "rejected"
     tr.updated_at = utcnow()
     session.add(tr)
+    record_audit_log(
+        session,
+        actor_id=_current_user_id(user),
+        action="travel_request_rejected",
+        target_type="travel_request",
+        target_id=tr.id,
+        details={"reason": payload.reason if payload else None},
+    )
     session.commit()
     session.refresh(tr)
     return {"status": "rejected", "travel": tr.model_dump(mode="python"), "reason": payload.reason if payload else None}
@@ -843,7 +924,13 @@ async def get_ticket(ticket_id: int, session: Session = Depends(get_session)):
 
 
 @router.patch("/domain/tickets/{ticket_id}")
-async def update_ticket(ticket_id: int, payload: TicketUpdateInput, session: Session = Depends(get_session)):
+async def update_ticket(
+    ticket_id: int,
+    payload: TicketUpdateInput,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"it_approver", "system_admin"}, "update_ticket")
     ticket = session.get(TicketModel, ticket_id)
     if not ticket:
         raise HTTPException(404, "ticket not found")
@@ -889,6 +976,15 @@ async def create_access_request(
         status=AccessStatus.PENDING,
     )
     session.add(data)
+    session.flush()
+    record_audit_log(
+        session,
+        actor_id=user_id,
+        action="access_request_submitted",
+        target_type="access_request",
+        target_id=data.id,
+        details={"resource": payload.resource, "requested_role": payload.requested_role},
+    )
     session.commit()
     session.refresh(data)
     return {
@@ -906,7 +1002,12 @@ async def list_my_access_requests(session: Session = Depends(get_session), user:
 
 
 @router.get("/domain/access-requests")
-async def list_access_requests(status: str | None = None, session: Session = Depends(get_session)):
+async def list_access_requests(
+    status: str | None = None,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"it_approver", "system_admin", "admin_approver"}, "list_access_requests")
     statement = select(AccessRequestModel)
     if status:
         if status not in AccessStatus:
@@ -919,6 +1020,7 @@ async def list_access_requests(status: str | None = None, session: Session = Dep
 async def approve_access_request(
     request_id: int, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
+    require_roles(user, {"it_approver", "system_admin"}, "approve_access")
     ar = session.get(AccessRequestModel, request_id)
     if not ar:
         raise HTTPException(404, "access request not found")
@@ -926,6 +1028,13 @@ async def approve_access_request(
     ar.approver_id = _current_user_id(user)
     ar.updated_at = utcnow()
     session.add(ar)
+    record_audit_log(
+        session,
+        actor_id=_current_user_id(user),
+        action="access_request_approved",
+        target_type="access_request",
+        target_id=ar.id,
+    )
     session.commit()
     session.refresh(ar)
     return {"status": "approved", "request": ar}
@@ -935,6 +1044,7 @@ async def approve_access_request(
 async def reject_access_request(
     request_id: int, reason: str | None = None, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
+    require_roles(user, {"it_approver", "system_admin"}, "reject_access")
     ar = session.get(AccessRequestModel, request_id)
     if not ar:
         raise HTTPException(404, "access request not found")
@@ -943,6 +1053,14 @@ async def reject_access_request(
     ar.approver_id = _current_user_id(user)
     ar.updated_at = utcnow()
     session.add(ar)
+    record_audit_log(
+        session,
+        actor_id=_current_user_id(user),
+        action="access_request_rejected",
+        target_type="access_request",
+        target_id=ar.id,
+        details={"reason": reason},
+    )
     session.commit()
     session.refresh(ar)
     return {"status": "rejected", "request": ar}

@@ -1,4 +1,6 @@
 from app.config import settings
+from app.models import AuditLog
+from sqlmodel import select
 
 
 def create_access(client):
@@ -54,3 +56,19 @@ def test_access_request_missing_role_validation(client):
         json={"resource": "db", "requested_role": "invalid", "justification": "need it"},
     )
     assert resp.status_code == 400
+
+
+def test_access_audit_logs(client, session):
+    created = client.post(
+        f"{settings.api_prefix}/domain/access-requests",
+        json={"resource": "lakehouse", "requested_role": "viewer", "justification": "analytics"},
+    ).json()["access_request"]
+
+    client.post(f"{settings.api_prefix}/domain/access-requests/{created['id']}/approve")
+
+    logs = session.exec(
+        select(AuditLog).where(AuditLog.target_id == str(created["id"]))
+    ).all()
+    actions = {log.action for log in logs}
+    assert "access_request_submitted" in actions
+    assert "access_request_approved" in actions

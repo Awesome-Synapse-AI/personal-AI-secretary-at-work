@@ -1,5 +1,8 @@
 from typing import Any
 
+import structlog
+from langsmith import traceable
+
 from app.state import ChatState
 from app.agents.clarification import (
     RequestType,
@@ -10,6 +13,8 @@ from app.agents.clarification import (
     update_pending_request,
 )
 from app.agents.tools import tool_runner
+
+logger = structlog.get_logger("domain_agent")
 
 
 def _add_event(state: ChatState, event_type: str, data: dict | None = None) -> None:
@@ -63,6 +68,7 @@ def _domain_intro(domain: str) -> str:
     )
 
 
+@traceable(name="domain_node", run_type="chain")
 async def domain_node(state: ChatState) -> ChatState:
     _add_event(state, "agent_started", {"agent": "DomainAgent", "domain": state.get("domain")})
 
@@ -91,6 +97,13 @@ async def domain_node(state: ChatState) -> ChatState:
     state.setdefault("actions", []).extend(actions)
 
     _add_event(state, "agent_finished", {"agent": "DomainAgent", "domain": domain})
+    logger.info(
+        "domain_result",
+        domain=domain,
+        pending=bool(pending),
+        actions=len(actions),
+        sensitivity=state.get("sensitivity"),
+    )
     return state
 
 
@@ -339,9 +352,14 @@ async def _call_tool(
     try:
         result = await tool_runner.call(service, "POST", path, payload)
         _add_event(state, "tool_result", {"service": service, "result": result})
+        status = (
+            result.get("result", {}).get("status")
+            or result.get("status")
+            or "submitted"
+        )
         return {
             "type": action_type,
-            "status": result.get("status", "submitted"),
+            "status": status,
             "payload": payload,
             "result": result.get("result"),
             "error": result.get("error"),
