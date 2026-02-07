@@ -1,5 +1,6 @@
 import os
 import uuid
+import io
 from pathlib import Path
 from datetime import date, datetime
 from typing import Optional, List
@@ -10,10 +11,14 @@ from sqlalchemy import func
 from dateutil import parser as dateparser
 import httpx
 import numpy as np
+import boto3
+import pytesseract
+from PIL import Image
 
 from app.auth import get_current_user, get_user_from_token
 from app.chat_service import handle_chat
 from app.db import get_session
+from app.config import settings
 from app.models import (
     AccessRequest as AccessRequestModel,
     LeaveEntitlement,
@@ -271,7 +276,7 @@ def _create_event(
 
 
 def _embedding_url() -> str:
-    return os.getenv("EMBEDDING_URL", "http://embedding-svc:8000/embed")
+    return settings.embedding_url
 
 
 async def _embed_texts(texts: List[str]) -> list[list[float]]:
@@ -296,22 +301,21 @@ def _deserialize_vec(blob: bytes) -> list[float]:
 
 
 def _qdrant_client():
-    host = os.getenv("QDRANT_HOST")
+    host = settings.qdrant_host
     if not host:
         return None
     from qdrant_client import QdrantClient
 
     return QdrantClient(
         host=host,
-        port=int(os.getenv("QDRANT_PORT", 6333)),
-        api_key=os.getenv("QDRANT_API_KEY"),
+        port=int(settings.qdrant_port),
+        api_key=settings.qdrant_api_key,
     )
 
 
-def _ensure_collection(client, size: int):
+def _ensure_collection(client, size: int, collection: str):
     from qdrant_client.http import models as qmodels
 
-    collection = os.getenv("QDRANT_COLLECTION", "documents")
     collections = client.get_collections().collections
     if not any(c.name == collection for c in collections):
         client.create_collection(
@@ -321,9 +325,54 @@ def _ensure_collection(client, size: int):
 
 
 def _upload_dir() -> Path:
-    p = Path(os.getenv("UPLOAD_DIR", "./data/uploads"))
+    p = Path(settings.upload_dir)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _storage_client():
+    if not settings.storage_endpoint:
+        return None
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.storage_endpoint,
+        aws_access_key_id=settings.storage_access_key,
+        aws_secret_access_key=settings.storage_secret_key,
+        region_name=settings.storage_region,
+        use_ssl=settings.storage_use_ssl,
+    )
+
+
+def _choose_collection(scope: str | None, source: str | None) -> str:
+    if scope == "policy_hr":
+        return settings.qdrant_collection_policy_hr
+    if scope == "policy_it":
+        return settings.qdrant_collection_policy_it
+    if scope == "policy_travel_expense":
+        return settings.qdrant_collection_policy_travel_expense
+    return settings.qdrant_collection_user_docs
+
+
+def _chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> list[str]:
+    words = text.split()
+    chunks = []
+    i = 0
+    while i < len(words):
+        chunk_words = words[i : i + chunk_size]
+        chunks.append(" ".join(chunk_words))
+        i += max(1, chunk_size - overlap)
+    return chunks if chunks else []
+
+
+def _ocr_bytes(content: bytes, content_type: str | None) -> str:
+    if not content_type:
+        return ""
+    if "image" in content_type:
+        image = Image.open(io.BytesIO(content))
+        if settings.tesseract_cmd:
+            pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
+        return pytesseract.image_to_string(image)
+    return ""
 
 # ---------- Workspace ----------
 
@@ -929,26 +978,48 @@ async def upload_document(
     with open(path, "wb") as f:
         f.write(file)
 
-    text_content = file.decode(errors="ignore") if content_type and "text" in content_type else ""
+    if not content_type:
+        import mimetypes
+
+        content_type = mimetypes.guess_type(filename)[0]
+
+    s3_path = None
+    client = _storage_client()
+    if client:
+        try:
+            bucket = settings.storage_bucket
+            client.create_bucket(Bucket=bucket)  # idempotent if exists on minio
+        except Exception:
+            pass
+        client.upload_file(str(path), settings.storage_bucket, name)
+        s3_path = f"s3://{settings.storage_bucket}/{name}"
+
+    text_content = ""
+    if content_type and "text" in content_type:
+        text_content = file.decode(errors="ignore")
+    else:
+        ocr_text = _ocr_bytes(file, content_type)
+        text_content = ocr_text or text_content
+
     doc = Document(
         owner=owner,
         scope=scope,
         source=source,
         title=filename,
-        path=str(path),
+        path=s3_path or str(path),
         mime_type=content_type,
     )
     session.add(doc)
     session.commit()
     session.refresh(doc)
 
-    chunks = [text_content] if text_content else []
+    chunks = _chunk_text(text_content) if text_content else []
     vectors = await _embed_texts(chunks) if chunks else []
 
-    client = _qdrant_client()
-    collection = os.getenv("QDRANT_COLLECTION", "documents")
-    if client and vectors:
-        _ensure_collection(client, len(vectors[0]))
+    q_client = _qdrant_client()
+    collection = _choose_collection(scope, source)
+    if q_client and vectors:
+        _ensure_collection(q_client, len(vectors[0]), collection)
         payloads = [{"document_id": doc.id, "chunk_index": idx, "owner": owner, "scope": scope} for idx, _ in enumerate(vectors)]
         from qdrant_client.http import models as qmodels
 
@@ -956,7 +1027,7 @@ async def upload_document(
             qmodels.PointStruct(id=None, vector=vectors[i], payload=payloads[i])
             for i in range(len(vectors))
         ]
-        client.upsert(collection_name=collection, wait=True, points=points)
+        q_client.upsert(collection_name=collection, wait=True, points=points)
 
     for idx, chunk in enumerate(chunks):
         session.add(
@@ -980,9 +1051,9 @@ async def search_documents(payload: DocumentSearchInput, session: Session = Depe
     results: list[dict] = []
 
     client = _qdrant_client()
-    collection = os.getenv("QDRANT_COLLECTION", "documents")
+    collection = payload.collection or _choose_collection(payload.scope, None)
     if client:
-        _ensure_collection(client, len(query_vec))
+        _ensure_collection(client, len(query_vec), collection)
         hits = client.search(
             collection_name=collection,
             query_vector=query_vec,

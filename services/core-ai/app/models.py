@@ -295,3 +295,4 @@ class DocumentSearchInput(BaseModel):
     top_k: int = 5
     owner: str | None = None
     scope: str | None = None
+    collection: str | None = None  # optional override

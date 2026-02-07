@@ -30,5 +30,28 @@ class Settings(BaseSettings):
     # single container mode: domain endpoints mounted in core-ai under /api/v1/domain
     domain_service_url: str = "http://localhost:8000/api/v1/domain"
 
+    # MinIO / S3-compatible storage for documents
+    storage_endpoint: str | None = None  # e.g., http://minio:9000
+    storage_bucket: str = "documents"
+    storage_access_key: str | None = None
+    storage_secret_key: str | None = None
+    storage_use_ssl: bool = False
+    storage_region: str | None = None
+
+    # OCR / Tesseract
+    tesseract_cmd: str | None = None  # set to tesseract binary path if not on PATH
+
+    # Qdrant / embeddings
+    qdrant_host: str | None = None
+    qdrant_port: int = 6333
+    qdrant_api_key: str | None = None
+    qdrant_collection_user_docs: str = "user_docs"
+    qdrant_collection_policy_hr: str = "policy_hr"
+    qdrant_collection_policy_it: str = "policy_it"
+    qdrant_collection_policy_travel_expense: str = "policy_travel_expense"
+    embedding_url: str = "http://embedding-svc:8000/embed"
+
+    upload_dir: str = "./data/uploads"
+
 
 settings = Settings()
