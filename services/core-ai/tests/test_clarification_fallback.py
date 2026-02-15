@@ -1,7 +1,7 @@
 import pytest
 
 from app.agents import domain as domain_agent
-from app.agents.clarification import RequestType, classify_request
+from app.agents.clarification import RequestType, classify_request, extract_fields
 from app.state import ChatState
 
 
@@ -120,3 +120,41 @@ async def test_submit_access_request_normalizes_write_role(monkeypatch):
 
     assert action["status"] == "submitted"
     assert captured["payload"]["requested_role"] == "editor"
+
+
+@pytest.mark.asyncio
+async def test_extract_fields_accepts_string_request_type(monkeypatch):
+    async def fake_call_llm_json(*args, **kwargs):
+        return {"request_type": "travel", "fields": {"origin": "BKK"}}
+
+    monkeypatch.setattr("app.agents.clarification.call_llm_json", fake_call_llm_json)
+    updates = await extract_fields("travel", "from bangkok")
+    assert updates["origin"] == "BKK"
+
+
+@pytest.mark.asyncio
+async def test_domain_pending_string_type_does_not_crash(monkeypatch):
+    async def fake_extract_fields(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(domain_agent, "extract_fields", fake_extract_fields)
+
+    state = ChatState(
+        message="Dubai",
+        domain="ops",
+        pending_request={
+            "domain": "ops",
+            "type": "travel",
+            "filled": {"destination": "Bangkok", "departure_date": None, "return_date": None},
+            "missing": ["origin", "departure_date", "return_date"],
+            "step": "collecting_details",
+        },
+        actions=[],
+        events=[],
+    )
+
+    result = await domain_agent.domain_node(state)
+
+    assert result["pending_request"] is not None
+    assert result["pending_request"]["filled"]["origin"] == "Dubai"
+    assert "departure date" in result["response"].lower()

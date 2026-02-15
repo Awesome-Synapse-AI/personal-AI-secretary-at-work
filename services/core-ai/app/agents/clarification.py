@@ -147,29 +147,30 @@ async def classify_request(domain: str, message: str) -> tuple[RequestType | Non
     return request_type_enum, _normalize_fields(request_type_enum, fields)
 
 
-async def extract_fields(request_type: RequestType, message: str) -> dict[str, Any]:
-    if request_type not in FIELD_SETS:
+async def extract_fields(request_type: RequestType | str, message: str) -> dict[str, Any]:
+    req_enum = _as_request_type(request_type)
+    if not req_enum or req_enum not in FIELD_SETS:
         return {}
-    prompt = _extraction_prompt(request_type)
+    prompt = _extraction_prompt(req_enum)
     payload = await call_llm_json(prompt, message, max_tokens=256)
     if not payload:
-        logger.warning("Clarify extract_fields got empty payload for type=%s", request_type)
-        print(f"Clarify extract_fields empty payload type={request_type}", flush=True)
+        logger.warning("Clarify extract_fields got empty payload for type=%s", req_enum)
+        print(f"Clarify extract_fields empty payload type={req_enum}", flush=True)
         return {}
     declared = payload.get("request_type")
-    if declared and declared != request_type:
+    if declared and declared != req_enum:
         try:
             declared_enum = RequestType(declared)
         except ValueError:
             declared_enum = None
-        if declared_enum != request_type:
-            logger.warning("Clarify extract_fields mismatched type %s (expected %s)", declared, request_type)
-            print(f"Clarify extract_fields mismatched type {declared} expected {request_type}", flush=True)
+        if declared_enum != req_enum:
+            logger.warning("Clarify extract_fields mismatched type %s (expected %s)", declared, req_enum)
+            print(f"Clarify extract_fields mismatched type {declared} expected {req_enum}", flush=True)
             return {}
     fields = payload.get("fields", {})
     logger.info("Clarify extract_fields payload: %s", payload)
     print(f"Clarify extract_fields payload: {payload}", flush=True)
-    return _normalize_fields(request_type, fields)
+    return _normalize_fields(req_enum, fields)
 
 
 def next_question(pending: dict[str, Any]) -> str:

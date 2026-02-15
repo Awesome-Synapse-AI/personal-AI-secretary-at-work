@@ -8,6 +8,7 @@ from langsmith import traceable
 from app.state import ChatState
 from app.agents.clarification import (
     RequestType,
+    _as_request_type,
     build_pending_request,
     classify_request,
     extract_fields,
@@ -457,7 +458,10 @@ def _to_iso_date(value: object) -> str | None:
 
 
 async def _extract_pending_updates(pending: dict[str, Any], message: str) -> dict[str, Any]:
-    updates = await extract_fields(pending.get("type", ""), message)  # type: ignore[arg-type]
+    request_type = _as_request_type(pending.get("type"))
+    if request_type is None:
+        return {}
+    updates = await extract_fields(request_type, message)
     if updates:
         return updates
     missing = pending.get("missing", [])
