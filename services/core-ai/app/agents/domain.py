@@ -1,4 +1,5 @@
 from typing import Any
+import re
 
 import structlog
 from dateutil import parser as dateparser
@@ -25,26 +26,26 @@ def _add_event(state: ChatState, event_type: str, data: dict | None = None) -> N
 def _domain_intro(domain: str) -> str:
     if domain == "hr":
         return (
-            "HR help:\n"
-            "- Create or update leave requests (annual, sick, unpaid)\n"
-            "- Check leave balances and status\n"
-            "- Answer HR policy questions\n"
+            "HR help:<br>"
+            "- Create or update leave requests (annual, sick, unpaid)<br>"
+            "- Check leave balances and status<br>"
+            "- Answer HR policy questions<br>"
             "Examples: \"I need sick leave next Monday\", \"How many vacation days do I have left?\""
         )
     if domain == "ops":
         return (
-            "Operations help:\n"
-            "- Log expenses and attach receipts\n"
-            "- Create travel requests (flights, hotels)\n"
-            "- Explain travel/expense policy limits\n"
+            "Operations help:<br>"
+            "- Log expenses and attach receipts<br>"
+            "- Create travel requests (flights, hotels)<br>"
+            "- Explain travel/expense policy limits<br>"
             "Examples: \"Add a $45 taxi from yesterday\", \"Book a flight to Singapore next Monday\""
         )
     if domain == "it":
         return (
-            "IT help:\n"
-            "- File IT tickets or facilities tickets\n"
-            "- Troubleshoot common issues (VPN, Wi‑Fi, laptop)\n"
-            "- Create access requests for systems/repos\n"
+            "IT help:<br>"
+            "- File IT tickets or facilities tickets<br>"
+            "- Troubleshoot common issues (VPN, Wi‑Fi, laptop)<br>"
+            "- Create access requests for systems/repos<br>"
             "Examples: \"VPN keeps dropping\", \"I need write access to Repo X\""
         )
     if domain == "workspace":
@@ -112,7 +113,7 @@ async def _handle_hr(
     message: str, pending: dict[str, Any] | None, state: ChatState
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") == RequestType.LEAVE:
-        updates = await extract_fields(RequestType.LEAVE, message)
+        updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
             return next_question(pending), pending, []
@@ -138,7 +139,7 @@ async def _handle_ops(
     message: str, pending: dict[str, Any] | None, state: ChatState
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") in {RequestType.EXPENSE, RequestType.TRAVEL}:
-        updates = await extract_fields(pending.get("type", ""), message)  # type: ignore[arg-type]
+        updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
             return next_question(pending), pending, []
@@ -174,7 +175,7 @@ async def _handle_it(
     message: str, pending: dict[str, Any] | None, state: ChatState
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") in {RequestType.ACCESS, RequestType.TICKET}:
-        updates = await extract_fields(pending.get("type", ""), message)  # type: ignore[arg-type]
+        updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
             return next_question(pending), pending, []
@@ -202,7 +203,7 @@ async def _handle_workspace(
     message: str, pending: dict[str, Any] | None, state: ChatState
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") == RequestType.WORKSPACE_BOOKING:
-        updates = await extract_fields(RequestType.WORKSPACE_BOOKING, message)
+        updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
             return next_question(pending), pending, []
@@ -281,7 +282,7 @@ async def _submit_travel_request(pending: dict[str, Any], state: ChatState) -> d
         "destination": pending["filled"].get("destination"),
         "departure_date": _to_iso_date(pending["filled"].get("departure_date")),
         "return_date": _to_iso_date(pending["filled"].get("return_date")),
-        "class": pending["filled"].get("class"),
+        "travel_class": pending["filled"].get("class"),
     }
     return await _call_tool(state, "expense", "/travel-requests", payload, "travel_request")
 
@@ -296,9 +297,10 @@ async def _submit_ticket_request(pending: dict[str, Any], state: ChatState) -> d
 
 
 async def _submit_access_request(pending: dict[str, Any], state: ChatState) -> dict[str, Any]:
+    requested_role = _normalize_access_role(pending["filled"].get("requested_role"))
     payload = {
         "resource": pending["filled"].get("resource"),
-        "requested_role": pending["filled"].get("requested_role"),
+        "requested_role": requested_role,
         "justification": pending["filled"].get("justification"),
     }
     return await _call_tool(state, "access", "/access-requests", payload, "access_request")
@@ -452,3 +454,70 @@ def _to_iso_date(value: object) -> str | None:
         if dt:
             return dt.date().isoformat()
     return value if isinstance(value, str) else None
+
+
+async def _extract_pending_updates(pending: dict[str, Any], message: str) -> dict[str, Any]:
+    updates = await extract_fields(pending.get("type", ""), message)  # type: ignore[arg-type]
+    if updates:
+        return updates
+    missing = pending.get("missing", [])
+    if not missing:
+        return {}
+    key = missing[0]
+    coerced = _coerce_answer_for_field(key, message)
+    return {key: coerced} if coerced is not None else {}
+
+
+def _coerce_answer_for_field(field: str, message: str) -> Any:
+    text = (message or "").strip()
+    if not text:
+        return None
+    if field in {"start_date", "end_date", "date", "departure_date", "return_date"}:
+        return _to_iso_date(text) or text
+    if field in {"start_time", "end_time", "description", "location", "resource", "resource_name"}:
+        return text
+    if field in {"origin", "destination", "leave_type", "category", "project_code", "reason", "justification"}:
+        return text
+    if field == "amount":
+        m = re.search(r"([0-9]+(?:\.[0-9]+)?)", text.replace(",", ""))
+        return float(m.group(1)) if m else None
+    if field == "currency":
+        symbols = {"$": "USD", "€": "EUR", "£": "GBP", "฿": "THB", "¥": "JPY"}
+        for symbol, code in symbols.items():
+            if symbol in text:
+                return code
+        m = re.search(r"\b([A-Za-z]{3})\b", text)
+        return m.group(1).upper() if m else None
+    if field == "requested_role":
+        return _normalize_access_role(text)
+    if field == "subtype":
+        lower = text.lower()
+        if "facility" in lower:
+            return "facilities"
+        if "it" in lower:
+            return "it"
+        return None
+    if field == "resource_type":
+        lower = text.lower()
+        for value in ("room", "desk", "equipment", "parking"):
+            if value in lower:
+                return value
+        return None
+    return text
+
+
+def _normalize_access_role(role: Any) -> str | None:
+    if role is None:
+        return None
+    value = str(role).strip().lower()
+    mapping = {
+        "read": "viewer",
+        "viewer": "viewer",
+        "view": "viewer",
+        "write": "editor",
+        "editor": "editor",
+        "edit": "editor",
+        "admin": "admin",
+        "owner": "owner",
+    }
+    return mapping.get(value, value or None)

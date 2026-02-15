@@ -126,7 +126,7 @@ async def classify_request(domain: str, message: str) -> tuple[RequestType | Non
     if not payload:
         logger.warning("Clarify classify_request got empty payload for domain=%s", domain)
         print(f"Clarify classify_request empty payload domain={domain}", flush=True)
-        return None, {}
+        return _heuristic_classify_request(domain, message)
     request_type = payload.get("request_type")
     if isinstance(request_type, str):
         try:
@@ -134,13 +134,13 @@ async def classify_request(domain: str, message: str) -> tuple[RequestType | Non
         except ValueError:
             logger.warning("Clarify classify_request invalid type %s for domain %s", request_type, domain)
             print(f"Clarify classify_request invalid type {request_type} for domain {domain}", flush=True)
-            return None, {}
+            return _heuristic_classify_request(domain, message)
     else:
         request_type_enum = None
     if request_type_enum not in allowed:
         logger.warning("Clarify classify_request invalid type %s for domain %s", request_type, domain)
         print(f"Clarify classify_request invalid type {request_type} for domain {domain}", flush=True)
-        return None, {}
+        return _heuristic_classify_request(domain, message)
     fields = payload.get("fields", {})
     logger.info("Clarify classify_request payload: %s", payload)
     print(f"Clarify classify_request payload: {payload}", flush=True)
@@ -281,3 +281,36 @@ def _to_iso_date(value: Any) -> str | None:
     if not dt:
         return None
     return dt.date().isoformat()
+
+
+def _heuristic_classify_request(domain: str, message: str) -> tuple[RequestType | None, dict[str, Any]]:
+    """
+    Deterministic fallback when LLM classification is unavailable/invalid.
+    Keeps flows interactive by entering the correct request type so the
+    next-question prompts can collect missing fields.
+    """
+    lower = (message or "").lower()
+
+    if domain == "ops":
+        travel_words = ("travel", "trip", "flight", "hotel", "book travel", "itinerary")
+        expense_words = ("expense", "receipt", "reimburse", "taxi", "meal", "hotel bill")
+        if any(word in lower for word in travel_words):
+            return RequestType.TRAVEL, {}
+        if any(word in lower for word in expense_words):
+            return RequestType.EXPENSE, {}
+
+    if domain == "hr":
+        if any(word in lower for word in ("leave", "pto", "vacation", "holiday", "sick")):
+            return RequestType.LEAVE, {}
+
+    if domain == "it":
+        if any(word in lower for word in ("access", "permission", "repo access", "grant")):
+            return RequestType.ACCESS, {}
+        if any(word in lower for word in ("ticket", "vpn", "wifi", "password", "laptop", "issue")):
+            return RequestType.TICKET, {}
+
+    if domain == "workspace":
+        if any(word in lower for word in ("book", "reserve", "room", "desk", "equipment", "parking")):
+            return RequestType.WORKSPACE_BOOKING, {}
+
+    return None, {}
