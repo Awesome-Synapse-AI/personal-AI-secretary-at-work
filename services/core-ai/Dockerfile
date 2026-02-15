@@ -1,21 +1,8 @@
-FROM python:3.11-slim
+FROM local/core-ai-base:latest
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-# Install system deps for torch, pillow, tesseract
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    gcc \
-    g++ \
-    libgl1 \
-    tesseract-ocr \
-    && rm -rf /var/lib/apt/lists/*
-
-# Keep pip/toolchain up to date to avoid corrupted wheels
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r /app/requirements.txt
-
+# Requirements are already baked into the base image.
 COPY app /app/app
 
 ENV PYTHONUNBUFFERED=1

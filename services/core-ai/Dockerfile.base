@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+# Base image that pre-installs all system and Python deps from requirements.txt.
+WORKDIR /opt/core-ai
+
+COPY requirements.txt /opt/core-ai/requirements.txt
+
+# System packages needed by torch, pillow, tesseract, etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    gcc \
+    g++ \
+    libgl1 \
+    tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep pip/toolchain up to date and install all Python deps once in the base image.
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r /opt/core-ai/requirements.txt
+
+ENV PYTHONUNBUFFERED=1

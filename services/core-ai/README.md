@@ -15,7 +15,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `AUTH_DISABLED` (default: true)
 - `KEYCLOAK_REALM_URL` (default: http://localhost:8080/realms/ai-secretary)
 - `KEYCLOAK_CLIENT_ID` (default: core-ai)
-- `TOOLS_ENABLED` (default: false)
+- `TOOLS_ENABLED` (default: true)
 - `SERVICE_AUTH_TOKEN` (optional: bearer token for domain service calls)
 - `LOG_LEVEL` (default: INFO)
 - LLM classification:
