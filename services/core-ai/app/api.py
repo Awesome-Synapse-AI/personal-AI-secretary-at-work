@@ -656,6 +656,20 @@ async def list_my_requests(session: Session = Depends(get_session), user: UserCo
     return {"requests": results}
 
 
+@router.get("/domain/requests")
+async def list_requests(
+    status: str | None = None,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"hr_approver", "manager", "system_admin"}, "list_leave_requests")
+    stmt = select(LeaveRequestModel)
+    if status:
+        stmt = stmt.where(LeaveRequestModel.status == status)
+    results = session.exec(stmt.order_by(LeaveRequestModel.created_at.desc())).all()
+    return {"requests": results}
+
+
 @router.post("/domain/requests/{request_id}/approve")
 async def approve_leave_request(
     request_id: int, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
@@ -787,10 +801,38 @@ async def list_my_expenses(session: Session = Depends(get_session), user: UserCo
     return {"expenses": results}
 
 
+@router.get("/domain/expenses")
+async def list_expenses(
+    status: str | None = None,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"admin_approver", "manager", "system_admin"}, "list_expenses")
+    stmt = select(ExpenseModel)
+    if status:
+        stmt = stmt.where(ExpenseModel.status == status)
+    results = session.exec(stmt.order_by(ExpenseModel.created_at.desc())).all()
+    return {"expenses": results}
+
+
 @router.get("/domain/travel-requests/me")
 async def list_my_travel_requests(session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
     user_id = _current_user_id(user)
     results = session.exec(select(TravelModel).where(TravelModel.user_id == user_id)).all()
+    return {"travel_requests": results}
+
+
+@router.get("/domain/travel-requests")
+async def list_travel_requests(
+    status: str | None = None,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    require_roles(user, {"admin_approver", "manager", "system_admin"}, "list_travel_requests")
+    stmt = select(TravelModel)
+    if status:
+        stmt = stmt.where(TravelModel.status == status)
+    results = session.exec(stmt.order_by(TravelModel.created_at.desc())).all()
     return {"travel_requests": results}
 
 

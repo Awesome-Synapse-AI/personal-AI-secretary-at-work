@@ -24,21 +24,37 @@ export default function ApprovalsPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [leaveRes, expRes, travelRes, accessRes, ticketRes] = await Promise.all([
-        api.get<{ requests: LeaveRequest[] }>(`/domain/requests/me`).then((r) => r.requests),
-        api.get<{ expenses: Expense[] }>(`/domain/expenses/me`).then((r) => r.expenses),
-        api.get<{ travel_requests: TravelRequest[] }>(`/domain/travel-requests/me`).then((r) => r.travel_requests),
-        api.get<{ access_requests: AccessRequest[] }>(`/domain/access-requests?status=pending`).then((r) => r.access_requests),
-        api.get<{ tickets: Ticket[] }>(`/domain/tickets/me`).then((r) => r.tickets),
+      const results = await Promise.allSettled([
+        fetchWithFallback<LeaveRequest[]>([
+          () => api.get<{ requests: LeaveRequest[] }>("/domain/requests?status=submitted").then((r) => r.requests),
+          () => api.get<{ requests: LeaveRequest[] }>("/domain/requests/me").then((r) => r.requests),
+        ]),
+        fetchWithFallback<Expense[]>([
+          () => api.get<{ expenses: Expense[] }>("/domain/expenses?status=submitted").then((r) => r.expenses),
+          () => api.get<{ expenses: Expense[] }>("/domain/expenses/me").then((r) => r.expenses),
+        ]),
+        fetchWithFallback<TravelRequest[]>([
+          () => api.get<{ travel_requests: TravelRequest[] }>("/domain/travel-requests?status=submitted").then((r) => r.travel_requests),
+          () => api.get<{ travel_requests: TravelRequest[] }>("/domain/travel-requests/me").then((r) => r.travel_requests),
+        ]),
+        api.get<{ access_requests: AccessRequest[] }>("/domain/access-requests?status=pending").then((r) => r.access_requests),
+        api.get<{ tickets: Ticket[] }>("/domain/tickets/me").then((r) => r.tickets),
       ]);
-      setLeaves(leaveRes);
-      setExpenses(expRes);
-      setTravel(travelRes);
-      setAccess(accessRes);
-      setTickets(ticketRes);
+
+      const [leaveRes, expRes, travelRes, accessRes, ticketRes] = results.map((r) => (r.status === "fulfilled" ? r.value : []));
+
+      setLeaves(leaveRes as LeaveRequest[]);
+      setExpenses(expRes as Expense[]);
+      setTravel(travelRes as TravelRequest[]);
+      setAccess(accessRes as AccessRequest[]);
+      setTickets(ticketRes as Ticket[]);
+
+      const firstError = results.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+      setToast(firstError ? (firstError.reason?.message || "Some queues failed to load") : null);
     } catch (err) {
       console.error(err);
-      setToast("Failed to load approval queues");
+      const msg = err instanceof Error ? err.message : "Failed to load approval queues";
+      setToast(msg);
     } finally {
       setLoading(false);
     }
@@ -143,6 +159,19 @@ export default function ApprovalsPage() {
       )}
     </div>
   );
+}
+
+async function fetchWithFallback<T>(fns: Array<() => Promise<T>>): Promise<T> {
+  let lastError: unknown;
+  for (const fn of fns) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error("No fetch functions provided");
 }
 
 function ApprovalCard<T extends { id: number; status?: string }>({
