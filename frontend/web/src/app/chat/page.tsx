@@ -6,7 +6,19 @@ import { useChatStream } from "@/lib/hooks/useChatStream";
 import { ChatEvent, ChatMessage, PendingRequest } from "@/types/domain";
 
 export default function ChatPage() {
-  const { messages, send, streamingText, pendingRequest, connecting, connectionError, events } = useChatStream();
+  const {
+    messages,
+    send,
+    streamingText,
+    pendingRequest,
+    connecting,
+    connectionError,
+    events,
+    sessions,
+    startNewSession,
+    openSession,
+    sessionId,
+  } = useChatStream();
   const [draft, setDraft] = useState("");
 
   const onSubmit = (e: React.FormEvent) => {
@@ -19,55 +31,83 @@ export default function ChatPage() {
   const timeline = buildPipeline(events);
 
   return (
-    <div className="space-y-4">
-      <header className="flex items-start justify-between gap-4">
-        <div>
-          <p className="pill w-fit">Employee Chat</p>
-          <h1 className="mt-2 text-2xl font-semibold">Chat with the core-ai agents</h1>
-          <p className="text-slate-300">Streaming tokens + Router -> Domain -> Tools pipeline visualization.</p>
-        </div>
-        {connectionError ? (
-          <span className="badge bg-amber-500/20 text-amber-100">{connectionError}</span>
-        ) : connecting ? (
-          <span className="badge">Connecting...</span>
-        ) : (
-          <span className="badge text-emerald-200">Live</span>
-        )}
-      </header>
-
-      <AgentPipeline timeline={timeline} />
-
-      <div className="glass-card flex flex-col gap-4 p-4">
-        <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
-          {messages.map((m) => (
-            <MessageBubble key={m.id} message={m} />
-          ))}
-          {streamingText ? (
-            <MessageBubble
-              message={{
-                id: "streaming",
-                role: "assistant",
-                content: streamingText,
-                createdAt: Date.now(),
-              }}
-              streaming
-            />
-          ) : null}
-        </div>
-
-        {pendingRequest ? <PendingCard pending={pendingRequest} /> : null}
-
-        <form onSubmit={onSubmit} className="flex items-end gap-3">
-          <textarea
-            className="input min-h-[60px] flex-1"
-            placeholder="Ask for leave, log an expense, book a room, file a ticket, or ask a policy question..."
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-          />
-          <button type="submit" className="btn-primary">
-            Send <Send size={16} />
+    <div className="grid gap-4 lg:grid-cols-[260px,1fr]">
+      <aside className="glass-card h-full p-4">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-semibold text-slate-100">Chat sessions</p>
+          <button onClick={startNewSession} className="btn-ghost px-2 py-1 text-xs">
+            New
           </button>
-        </form>
+        </div>
+        <div className="mt-3 h-[70vh] space-y-1 overflow-y-auto pr-1 text-sm">
+          {sessions.length === 0 ? <p className="text-slate-500">No sessions yet.</p> : null}
+          {sessions.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => openSession(s.id)}
+              className={`w-full rounded-lg px-3 py-2 text-left transition hover:bg-white/10 ${
+                s.id === sessionId ? "bg-white/10 border border-emerald-400/40" : "border border-white/5"
+              }`}
+            >
+              <p className="truncate text-slate-100">{s.title || "Untitled"}</p>
+              <p className="text-xs text-slate-500">Session {s.id.slice(0, 8)}</p>
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      <div className="space-y-4">
+        <header className="flex items-start justify-between gap-4">
+          <div>
+            <p className="pill w-fit">Employee Chat</p>
+            <h1 className="mt-2 text-2xl font-semibold">Chat with the core-ai agents</h1>
+            <p className="text-slate-300">
+              {"Streaming tokens + Router -> Domain -> Tools pipeline visualization."}
+            </p>
+          </div>
+          {connectionError ? (
+            <span className="badge bg-amber-500/20 text-amber-100">{connectionError}</span>
+          ) : connecting ? (
+            <span className="badge">Connecting...</span>
+          ) : (
+            <span className="badge text-emerald-200">Live</span>
+          )}
+        </header>
+
+        <AgentPipeline timeline={timeline} />
+
+        <div className="glass-card flex flex-col gap-4 p-4">
+          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
+            {messages.map((m) => (
+              <MessageBubble key={m.id} message={m} />
+            ))}
+            {streamingText ? (
+              <MessageBubble
+                message={{
+                  id: "streaming",
+                  role: "assistant",
+                  content: streamingText,
+                  createdAt: Date.now(),
+                }}
+                streaming
+              />
+            ) : null}
+          </div>
+
+          {pendingRequest ? <PendingCard pending={pendingRequest} /> : null}
+
+          <form onSubmit={onSubmit} className="flex items-end gap-3">
+            <textarea
+              className="input min-h-[60px] flex-1"
+              placeholder="Ask for leave, log an expense, book a room, file a ticket, or ask a policy question..."
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+            <button type="submit" className="btn-primary">
+              Send <Send size={16} />
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );

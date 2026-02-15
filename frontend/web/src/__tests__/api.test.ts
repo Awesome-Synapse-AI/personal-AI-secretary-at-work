@@ -23,7 +23,8 @@ describe("api helper", () => {
     const [, options] = (fetch as jest.Mock).mock.calls[0];
     expect((fetch as jest.Mock).mock.calls[0][0]).toBe(`${defaultBase}/chat`);
     expect(options.method).toBe("POST");
-    expect(options.headers["Content-Type"]).toBe("application/json");
+    const headerVal = options.headers instanceof Headers ? options.headers.get("Content-Type") : options.headers["Content-Type"];
+    expect(headerVal).toBe("application/json");
     expect(options.body).toBe(JSON.stringify(body));
   });
 });
