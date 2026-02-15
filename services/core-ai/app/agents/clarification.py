@@ -2,6 +2,7 @@ from enum import Enum
 from typing import Any
 
 import logging
+from dateutil import parser as dateparser
 
 from app.llm_client import call_llm_json
 
@@ -24,18 +25,18 @@ class RequestType(str, Enum):
 
 QUESTION_MAP = {
     "leave_type": "What kind of leave do you want to take (e.g., annual, sick)?",
-    "start_date": "Which exact start date do you want? Please use YYYY-MM-DD.",
-    "end_date": "Which exact end date do you want? Please use YYYY-MM-DD.",
+    "start_date": "Which exact start date do you want? Please use DD/MM/YYYY.",
+    "end_date": "Which exact end date do you want? Please use DD/MM/YYYY.",
     "start_time": "What is the start time? (e.g., tomorrow 9am, 2026-02-01 09:00)",
     "end_time": "What is the end time? (e.g., tomorrow 11am, 2026-02-01 11:00)",
     "amount": "How much was the expense?",
     "currency": "What currency was this in (e.g., USD, THB)?",
-    "date": "When did this expense occur? Please use YYYY-MM-DD.",
+    "date": "When did this expense occur? Please use DD/MM/YYYY.",
     "category": "What type of expense is this (e.g., taxi, hotel, meal)?",
     "origin": "Which city or airport are you departing from?",
     "destination": "What is the destination city or airport?",
-    "departure_date": "What is the departure date? Please use YYYY-MM-DD.",
-    "return_date": "What is the return date? Please use YYYY-MM-DD.",
+    "departure_date": "What is the departure date? Please use DD/MM/YYYY.",
+    "return_date": "What is the return date? Please use DD/MM/YYYY.",
     "subtype": "Is this an IT issue or a facilities issue?",
     "description": "Can you describe the issue in a sentence?",
     "location": "Which room or area is this in?",
@@ -71,9 +72,9 @@ FIELD_SETS = {
 }
 
 FIELD_DESCRIPTIONS = {
-    RequestType.LEAVE: "leave_type, start_date (YYYY-MM-DD), end_date (YYYY-MM-DD), reason",
-    RequestType.EXPENSE: "amount (number), currency (ISO 4217), date (YYYY-MM-DD), category, project_code",
-    RequestType.TRAVEL: "origin, destination, departure_date (YYYY-MM-DD), return_date (YYYY-MM-DD), class",
+    RequestType.LEAVE: "leave_type, start_date (DD/MM/YYYY), end_date (DD/MM/YYYY), reason",
+    RequestType.EXPENSE: "amount (number), currency (ISO 4217), date (DD/MM/YYYY), category, project_code",
+    RequestType.TRAVEL: "origin, destination, departure_date (DD/MM/YYYY), return_date (DD/MM/YYYY), class",
     RequestType.ACCESS: "resource, requested_role (read/write/admin), justification",
     RequestType.TICKET: "subtype (it or facilities), description, location",
     RequestType.WORKSPACE_BOOKING: "resource_type (room/desk/equipment/parking), resource_name, start_time (natural language ok), end_time (natural language ok), location, description",
@@ -215,6 +216,9 @@ def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | 
         value = source.get(key)
         if _is_missing(value):
             value = None
+        if value and key in {"start_date", "end_date", "date", "departure_date", "return_date"}:
+            iso = _to_iso_date(value)
+            value = iso or value  # fallback to original if parse fails so we can prompt again later
         normalized[key] = value
     return normalized
 
@@ -261,3 +265,19 @@ def _as_request_type(value: Any) -> RequestType | None:
         except ValueError:
             return None
     return None
+
+
+def _to_iso_date(value: Any) -> str | None:
+    """
+    Convert a human-entered date to ISO (YYYY-MM-DD).
+    Accepts day-first input such as DD/MM/YYYY.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        dt = dateparser.parse(value, dayfirst=True, yearfirst=False, fuzzy=True)
+    except Exception:
+        return None
+    if not dt:
+        return None
+    return dt.date().isoformat()

@@ -1,6 +1,7 @@
 from typing import Any
 
 import structlog
+from dateutil import parser as dateparser
 from langsmith import traceable
 
 from app.state import ChatState
@@ -256,8 +257,8 @@ async def _handle_doc_qa(
 async def _submit_leave_request(pending: dict[str, Any], state: ChatState) -> dict[str, Any]:
     payload = {
         "leave_type": pending["filled"].get("leave_type"),
-        "start_date": pending["filled"].get("start_date"),
-        "end_date": pending["filled"].get("end_date"),
+        "start_date": _to_iso_date(pending["filled"].get("start_date")),
+        "end_date": _to_iso_date(pending["filled"].get("end_date")),
         "reason": pending["filled"].get("reason"),
     }
     return await _call_tool(state, "leave", "/requests", payload, "leave_request")
@@ -267,7 +268,7 @@ async def _submit_expense_request(pending: dict[str, Any], state: ChatState) -> 
     payload = {
         "amount": pending["filled"].get("amount"),
         "currency": pending["filled"].get("currency"),
-        "date": pending["filled"].get("date"),
+        "date": _to_iso_date(pending["filled"].get("date")),
         "category": pending["filled"].get("category"),
         "project_code": pending["filled"].get("project_code"),
     }
@@ -278,8 +279,8 @@ async def _submit_travel_request(pending: dict[str, Any], state: ChatState) -> d
     payload = {
         "origin": pending["filled"].get("origin"),
         "destination": pending["filled"].get("destination"),
-        "departure_date": pending["filled"].get("departure_date"),
-        "return_date": pending["filled"].get("return_date"),
+        "departure_date": _to_iso_date(pending["filled"].get("departure_date")),
+        "return_date": _to_iso_date(pending["filled"].get("return_date")),
         "class": pending["filled"].get("class"),
     }
     return await _call_tool(state, "expense", "/travel-requests", payload, "travel_request")
@@ -347,26 +348,28 @@ async def _call_tool(
     path: str,
     payload: dict[str, Any],
     action_type: str,
-) -> dict[str, Any]:
-    _add_event(state, "tool_call", {"service": service, "path": path})
-    try:
-        result = await tool_runner.call(service, "POST", path, payload)
-        _add_event(state, "tool_result", {"service": service, "result": result})
-        status = (
-            result.get("result", {}).get("status")
-            or result.get("status")
-            or "submitted"
-        )
-        return {
-            "type": action_type,
-            "status": status,
-            "payload": payload,
-            "result": result.get("result"),
-            "error": result.get("error"),
-        }
-    except Exception as exc:  # pragma: no cover - network errors
-        _add_event(state, "tool_error", {"service": service, "error": str(exc)})
-        return {"type": action_type, "status": "failed", "payload": payload}
+    ) -> dict[str, Any]:
+        _add_event(state, "tool_call", {"service": service, "path": path})
+        try:
+            result = await tool_runner.call(service, "POST", path, payload)
+            _add_event(state, "tool_result", {"service": service, "result": result})
+            status = (
+                result.get("result", {}).get("status")
+                or result.get("status")
+                or "submitted"
+            )
+            return {
+                "type": action_type,
+                "status": status,
+                "payload": payload,
+                "result": result.get("result"),
+                # Surface either an explicit error from the tool or a skip reason
+                # (e.g., TOOLS_ENABLED=false) so the user sees a useful message.
+                "error": result.get("error") or result.get("reason"),
+            }
+        except Exception as exc:  # pragma: no cover - network errors
+            _add_event(state, "tool_error", {"service": service, "error": str(exc)})
+            return {"type": action_type, "status": "failed", "payload": payload}
 
 
 def _leave_success(pending: dict[str, Any]) -> str:
@@ -433,3 +436,19 @@ def _workspace_success(pending: dict[str, Any]) -> str:
 def _workspace_failure(action: dict[str, Any]) -> str:
     error = action.get("error") or "The booking could not be created."
     return f"Booking failed: {error}"
+
+
+def _to_iso_date(value: object) -> str | None:
+    """
+    Convert a user-entered date (day/month/year friendly) to ISO for backend APIs.
+    """
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            dt = dateparser.parse(value, dayfirst=True, yearfirst=False, fuzzy=True)
+        except Exception:
+            return value  # leave as-is; backend will raise a clear error
+        if dt:
+            return dt.date().isoformat()
+    return value if isinstance(value, str) else None

@@ -136,8 +136,8 @@ def _available_resources(session: Session, resource_type: ResourceType, start: d
 
 def _parse_time_range(start_text: str, end_text: str) -> tuple[datetime, datetime]:
     try:
-        start_dt = dateparser.parse(start_text)
-        end_dt = dateparser.parse(end_text)
+        start_dt = dateparser.parse(start_text, dayfirst=True, yearfirst=False)
+        end_dt = dateparser.parse(end_text, dayfirst=True, yearfirst=False)
     except Exception:
         raise HTTPException(400, "Cannot parse provided start/end time. Please use a clear time expression.")
     if not start_dt or not end_dt:
@@ -153,9 +153,9 @@ def _validate_expense(expense: ExpenseInput) -> None:
     if not expense.currency or len(expense.currency.strip()) != 3:
         raise HTTPException(400, "Currency must be a 3-letter code")
     try:
-        date.fromisoformat(expense.date)
+        _as_date(expense.date)
     except Exception:
-        raise HTTPException(400, "Date must be in YYYY-MM-DD format")
+        raise HTTPException(400, "Date must be in DD/MM/YYYY format")
     if not expense.category:
         raise HTTPException(400, "Category is required")
 
@@ -164,15 +164,15 @@ def _validate_travel(travel: TravelInput) -> None:
     if not travel.origin or not travel.destination:
         raise HTTPException(400, "Origin and destination are required")
     try:
-        dep = date.fromisoformat(travel.departure_date)
-    except Exception:
-        raise HTTPException(400, "departure_date must be YYYY-MM-DD")
+        dep = _as_date(travel.departure_date)
+    except HTTPException as exc:
+        raise HTTPException(400, "departure_date must be DD/MM/YYYY") from exc
     ret = None
     if travel.return_date:
         try:
-            ret = date.fromisoformat(travel.return_date)
-        except Exception:
-            raise HTTPException(400, "return_date must be YYYY-MM-DD")
+            ret = _as_date(travel.return_date)
+        except HTTPException as exc:
+            raise HTTPException(400, "return_date must be DD/MM/YYYY") from exc
     if ret and ret < dep:
         raise HTTPException(400, "return_date must be on/after departure_date")
     if travel.preferred_departure_time:
@@ -206,9 +206,26 @@ def _resource_id_by_name(session: Session, resource_type: ResourceType, name: st
 
 
 def _calc_days(start: str, end: str) -> float:
-    s = date.fromisoformat(start)
-    e = date.fromisoformat(end)
+    s = _as_date(start)
+    e = _as_date(end)
     return (e - s).days + 1
+
+
+def _as_date(value: str) -> date:
+    """
+    Parse a date string, accepting day-first formats like DD/MM/YYYY as well as ISO.
+    Raises HTTPException if parsing fails.
+    """
+    try:
+        return date.fromisoformat(value)
+    except Exception:
+        try:
+            dt = dateparser.parse(value, dayfirst=True, yearfirst=False)
+        except Exception:
+            raise HTTPException(400, "Date must be in DD/MM/YYYY format")
+        if not dt:
+            raise HTTPException(400, "Date must be in DD/MM/YYYY format")
+        return dt.date()
 
 
 def _google_calendar_service():
@@ -578,19 +595,40 @@ async def create_leave_request(
 ):
     user_id = _current_user_id(user)
     requested_days = _calc_days(payload.start_date, payload.end_date)
-    start = date.fromisoformat(payload.start_date)
+    start = _as_date(payload.start_date)
+    end = _as_date(payload.end_date)
     month = None  # yearly accrual for all leave types
     ent = _get_entitlement(session, user_id, start.year, payload.leave_type, month)
+
+    # In local/dev (auth disabled) auto-provision or top-up entitlement so flows don't break.
+    if not ent and settings.auth_disabled:
+        ent = LeaveEntitlement(
+            user_id=user_id,
+            year=start.year,
+            leave_type=payload.leave_type,
+            days_available=_default_entitlement_days(payload.leave_type, month) or requested_days,
+            month=month,
+        )
+        session.add(ent)
+        session.commit()
+        session.refresh(ent)
+
     if not ent:
         raise HTTPException(400, "No entitlement configured for this leave type/year")
+
     if requested_days > ent.days_available:
-        raise HTTPException(400, "Not enough leave balance")
+        if settings.auth_disabled:
+            # top up just enough to cover the request in dev so submission succeeds
+            ent.days_available = requested_days
+        else:
+            raise HTTPException(400, "Not enough leave balance")
+
     ent.days_available -= requested_days
     lr = LeaveRequestModel(
         user_id=user_id,
         leave_type=payload.leave_type,
-        start_date=date.fromisoformat(payload.start_date),
-        end_date=date.fromisoformat(payload.end_date),
+        start_date=start,
+        end_date=end,
         reason=payload.reason,
         status="submitted",
         requested_days=requested_days,
@@ -603,8 +641,8 @@ async def create_leave_request(
         session,
         user_id,
         title=f"Leave: {payload.leave_type}",
-        start_time=datetime.combine(date.fromisoformat(payload.start_date), datetime.min.time()),
-        end_time=datetime.combine(date.fromisoformat(payload.end_date), datetime.max.time()),
+        start_time=datetime.combine(start, datetime.min.time()),
+        end_time=datetime.combine(end, datetime.max.time()),
         source_type=EventSource.LEAVE,
         source_id=lr.id,
     )
