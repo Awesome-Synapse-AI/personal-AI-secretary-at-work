@@ -88,6 +88,7 @@ services:
   core-ai:
     build:
       context: ../../services/core-ai
+    image: personal-ai-secretary-core-ai:latest
     environment:
       REDIS_URL: redis://redis:6379/0
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}

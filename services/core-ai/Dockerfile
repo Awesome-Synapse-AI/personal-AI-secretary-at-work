@@ -12,7 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# Keep pip/toolchain up to date to avoid corrupted wheels
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
 
