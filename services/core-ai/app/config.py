@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     app_name: str = "core-ai"
     api_prefix: str = "/api/v1"
     log_level: str = "INFO"
+    cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     default_tenant_id: str = "default"
     redis_url: str = "redis://localhost:6379/0"
@@ -18,7 +19,9 @@ class Settings(BaseSettings):
     keycloak_client_id: str = "core-ai"
     keycloak_client_secret: str | None = None
 
-    tools_enabled: bool = False
+    # Enable internal domain tools by default so chat actions (leave, expense, etc.)
+    # actually call the co-hosted FastAPI endpoints in local/dev runs.
+    tools_enabled: bool = True
     service_auth_token: str | None = None
 
     llm_base_url: str = "http://llm:11434"
@@ -54,6 +57,13 @@ class Settings(BaseSettings):
     embedding_normalize: bool = True
 
     upload_dir: str = "./data/uploads"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        raw = (self.cors_allow_origins or "").strip()
+        if raw == "*":
+            return ["*"]
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
 settings = Settings()

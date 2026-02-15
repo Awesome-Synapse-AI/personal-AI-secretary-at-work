@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.tools import tool_runner
 from app.api import router
@@ -25,6 +26,14 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     configure_logging(settings.log_level)
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-ID", "X-Tenant-ID"],
+    )
     app.add_middleware(RequestContextMiddleware)
     app.include_router(router, prefix=settings.api_prefix)
     app.add_api_route("/metrics", metrics_endpoint, include_in_schema=False)

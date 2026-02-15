@@ -1,5 +1,6 @@
 fastapi>=0.110,<1
-uvicorn[standard]>=0.27,<1
+# Pin uvicorn to a known-good release; newer 0.40 wheels broke the bundled CLI (main missing).
+uvicorn[standard]==0.30.1
 pydantic>=2.5,<3
 pydantic-settings>=2.2,<3
 httpx>=0.27,<1
