@@ -221,6 +221,11 @@ INSERT INTO app_user (id, email, full_name, role) VALUES
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO leaveentitlement (user_id, year, leave_type, days_available, month) VALUES
+  -- Default local/dev user (auth disabled)
+  ('local-user', 2025, 'sick',   30, NULL),
+  ('local-user', 2025, 'annual', 8,  NULL),
+  ('local-user', 2026, 'sick',   30, NULL),
+  ('local-user', 2026, 'annual', 8,  NULL),
   ('emp-001', 2026, 'annual', 8, NULL),
   ('emp-001', 2026, 'sick',   30, NULL),
   ('emp-001', 2026, 'business', 7, NULL),
