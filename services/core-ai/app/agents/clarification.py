@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import Any
+import re
 
 import logging
 from dateutil import parser as dateparser
@@ -217,9 +218,20 @@ def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | 
         value = source.get(key)
         if _is_missing(value):
             value = None
+        if req_enum == RequestType.EXPENSE and value is not None:
+            if key == "amount":
+                value = _normalize_amount(value)
+            elif key == "currency":
+                value = _normalize_currency(value)
         if value and key in {"start_date", "end_date", "date", "departure_date", "return_date"}:
             iso = _to_iso_date(value)
             value = iso or value  # fallback to original if parse fails so we can prompt again later
+        if req_enum == RequestType.ACCESS and key == "requested_role" and value is not None:
+            value = _normalize_requested_role(value)
+        if req_enum == RequestType.TICKET and key == "subtype" and value is not None:
+            value = _normalize_ticket_subtype(value)
+        if req_enum == RequestType.WORKSPACE_BOOKING and key == "resource_type" and value is not None:
+            value = _normalize_resource_type(value)
         normalized[key] = value
     return normalized
 
@@ -315,3 +327,90 @@ def _heuristic_classify_request(domain: str, message: str) -> tuple[RequestType 
             return RequestType.WORKSPACE_BOOKING, {}
 
     return None, {}
+
+
+def _normalize_amount(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return v if v > 0 else None
+    if not isinstance(value, str):
+        return None
+    cleaned = value.replace(",", "")
+    matches = list(re.finditer(r"\d+(?:\.\d+)?", cleaned))
+    if not matches:
+        return None
+    best: float | None = None
+    best_score = -10
+    for m in matches:
+        num = float(m.group(0))
+        score = 0
+        context = cleaned[max(0, m.start() - 12): min(len(cleaned), m.end() + 12)].lower()
+        if any(token in context for token in ("$", "usd", "baht", "thb", "eur", "gbp", "jpy", "cost", "total", "amount")):
+            score += 2
+        if num.is_integer() and 1900 <= int(num) <= 2100:
+            score -= 1
+        if score > best_score or (score == best_score and (best is None or num > best)):
+            best_score = score
+            best = num
+    return best
+
+
+def _normalize_currency(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    if "$" in text:
+        return "USD"
+    word_map = {
+        "baht": "THB",
+        "thb": "THB",
+        "dollar": "USD",
+        "usd": "USD",
+        "euro": "EUR",
+        "eur": "EUR",
+        "pound": "GBP",
+        "gbp": "GBP",
+        "yen": "JPY",
+        "jpy": "JPY",
+    }
+    for word, code in word_map.items():
+        if re.search(rf"\b{re.escape(word)}s?\b", text):
+            return code
+    direct = re.search(r"\b([a-z]{3})\b", text)
+    if direct:
+        return direct.group(1).upper()
+    return None
+
+
+def _normalize_requested_role(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if re.search(r"\b(read|view|viewer)\b", text):
+        return "viewer"
+    if re.search(r"\b(write|edit|editor)\b", text):
+        return "editor"
+    if re.search(r"\badmin\b", text):
+        return "admin"
+    if re.search(r"\bowner\b", text):
+        return "owner"
+    return None
+
+
+def _normalize_ticket_subtype(value: Any) -> str | None:
+    text = str(value).strip().lower() if value is not None else ""
+    if re.search(r"\bfacilit(?:y|ies)\b", text):
+        return "facilities"
+    if re.search(r"\bit\b", text):
+        return "it"
+    return None
+
+
+def _normalize_resource_type(value: Any) -> str | None:
+    text = str(value).strip().lower() if value is not None else ""
+    for v in ("room", "desk", "equipment", "parking"):
+        if v in text:
+            return v
+    return None

@@ -461,15 +461,27 @@ async def _extract_pending_updates(pending: dict[str, Any], message: str) -> dic
     request_type = _as_request_type(pending.get("type"))
     if request_type is None:
         return {}
+    missing = list(pending.get("missing", []))
     updates = await extract_fields(request_type, message)
-    if updates:
-        return updates
-    missing = pending.get("missing", [])
-    if not missing:
-        return {}
-    key = missing[0]
-    coerced = _coerce_answer_for_field(key, message)
-    return {key: coerced} if coerced is not None else {}
+    merged: dict[str, Any] = {}
+    if isinstance(updates, dict):
+        for key, value in updates.items():
+            if value is not None:
+                merged[key] = value
+
+    inferred = _infer_fields_from_message(request_type, message, pending)
+    for key, value in inferred.items():
+        if value is not None and merged.get(key) is None:
+            merged[key] = value
+
+    for key in missing:
+        if merged.get(key) is not None:
+            continue
+        coerced = _coerce_answer_for_field(key, message)
+        if coerced is not None:
+            merged[key] = coerced
+
+    return merged
 
 
 def _coerce_answer_for_field(field: str, message: str) -> Any:
@@ -477,18 +489,43 @@ def _coerce_answer_for_field(field: str, message: str) -> Any:
     if not text:
         return None
     if field in {"start_date", "end_date", "date", "departure_date", "return_date"}:
-        return _to_iso_date(text) or text
+        if not _looks_like_date_expression(text):
+            return None
+        return _parse_iso_date_strict(text)
     if field in {"start_time", "end_time", "description", "location", "resource", "resource_name"}:
         return text
     if field in {"origin", "destination", "leave_type", "category", "project_code", "reason", "justification"}:
+        if field == "category":
+            inferred = _infer_expense_category(text)
+            if inferred:
+                return inferred
+        if field == "project_code":
+            inferred = _extract_project_code(text)
+            if inferred:
+                return inferred
         return text
     if field == "amount":
-        m = re.search(r"([0-9]+(?:\.[0-9]+)?)", text.replace(",", ""))
-        return float(m.group(1)) if m else None
+        return _extract_amount(text)
     if field == "currency":
-        symbols = {"$": "USD", "€": "EUR", "£": "GBP", "฿": "THB", "¥": "JPY"}
+        symbols = {"$": "USD"}
         for symbol, code in symbols.items():
             if symbol in text:
+                return code
+        lower = text.lower()
+        word_map = {
+            "baht": "THB",
+            "thb": "THB",
+            "dollar": "USD",
+            "usd": "USD",
+            "euro": "EUR",
+            "eur": "EUR",
+            "pound": "GBP",
+            "gbp": "GBP",
+            "yen": "JPY",
+            "jpy": "JPY",
+        }
+        for word, code in word_map.items():
+            if re.search(rf"\b{re.escape(word)}s?\b", lower):
                 return code
         m = re.search(r"\b([A-Za-z]{3})\b", text)
         return m.group(1).upper() if m else None
@@ -514,6 +551,14 @@ def _normalize_access_role(role: Any) -> str | None:
     if role is None:
         return None
     value = str(role).strip().lower()
+    if re.search(r"\b(read|viewer|view)\b", value):
+        return "viewer"
+    if re.search(r"\b(write|editor|edit)\b", value):
+        return "editor"
+    if re.search(r"\badmin\b", value):
+        return "admin"
+    if re.search(r"\bowner\b", value):
+        return "owner"
     mapping = {
         "read": "viewer",
         "viewer": "viewer",
@@ -525,3 +570,225 @@ def _normalize_access_role(role: Any) -> str | None:
         "owner": "owner",
     }
     return mapping.get(value, value or None)
+
+
+def _infer_fields_from_message(
+    request_type: RequestType, message: str, pending: dict[str, Any]
+) -> dict[str, Any]:
+    if request_type == RequestType.EXPENSE:
+        return _infer_expense_fields(message)
+    if request_type == RequestType.TRAVEL:
+        return _infer_travel_fields(message)
+    if request_type == RequestType.LEAVE:
+        return _infer_leave_fields(message)
+    if request_type == RequestType.ACCESS:
+        return _infer_access_fields(message)
+    if request_type == RequestType.TICKET:
+        return _infer_ticket_fields(message)
+    if request_type == RequestType.WORKSPACE_BOOKING:
+        return _infer_workspace_fields(message)
+    return {}
+
+
+def _infer_expense_fields(text: str) -> dict[str, Any]:
+    return {
+        "amount": _extract_amount(text),
+        "currency": _coerce_answer_for_field("currency", text),
+        "date": _parse_iso_date_strict(text),
+        "category": _infer_expense_category(text),
+        "project_code": _extract_project_code(text),
+    }
+
+
+def _infer_travel_fields(text: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    route = re.search(
+        r"\bfrom\s+([A-Za-z][A-Za-z\s\-]{1,40}?)\s+to\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|[,.])",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if route:
+        fields["origin"] = route.group(1).strip()
+        fields["destination"] = route.group(2).strip()
+    else:
+        to_match = re.search(r"\bto\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|[,.])", text, flags=re.IGNORECASE)
+        from_match = re.search(r"\bfrom\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|[,.])", text, flags=re.IGNORECASE)
+        if from_match:
+            fields["origin"] = from_match.group(1).strip()
+        if to_match:
+            fields["destination"] = to_match.group(1).strip()
+
+    dates = _extract_iso_dates_from_text(text)
+    if len(dates) >= 1:
+        fields["departure_date"] = dates[0]
+    if len(dates) >= 2:
+        fields["return_date"] = dates[1]
+
+    low = text.lower()
+    if "business class" in low:
+        fields["class"] = "business"
+    elif "economy" in low:
+        fields["class"] = "economy"
+    elif "first class" in low:
+        fields["class"] = "first"
+    return fields
+
+
+def _infer_leave_fields(text: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    low = text.lower()
+    leave_types = ("annual", "sick", "unpaid", "business", "wedding", "bereavement")
+    for leave_type in leave_types:
+        if re.search(rf"\b{leave_type}\b", low):
+            fields["leave_type"] = leave_type
+            break
+    dates = _extract_iso_dates_from_text(text)
+    if len(dates) >= 1:
+        fields["start_date"] = dates[0]
+    if len(dates) >= 2:
+        fields["end_date"] = dates[1]
+    if re.search(r"\bfor\b", low):
+        fields["reason"] = text
+    return fields
+
+
+def _infer_access_fields(text: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    role = _normalize_access_role(text)
+    if role in {"viewer", "editor", "admin", "owner"}:
+        fields["requested_role"] = role
+    m = re.search(r"\baccess\s+(?:to|for)\s+([A-Za-z0-9._/\-]+)", text, flags=re.IGNORECASE)
+    if m:
+        fields["resource"] = m.group(1)
+    if len(text.strip()) > 8:
+        fields["justification"] = text.strip()
+    return fields
+
+
+def _infer_ticket_fields(text: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {"description": text.strip()}
+    low = text.lower()
+    fields["subtype"] = "facilities" if any(w in low for w in ("ac", "aircon", "light", "room", "facility")) else "it"
+    m = re.search(r"\b(?:in|at)\s+([A-Za-z0-9#\-\s]{2,40})", text, flags=re.IGNORECASE)
+    if m:
+        fields["location"] = m.group(1).strip().rstrip(".")
+    return fields
+
+
+def _infer_workspace_fields(text: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    low = text.lower()
+    for value in ("room", "desk", "equipment", "parking"):
+        if value in low:
+            fields["resource_type"] = value
+            break
+    if "resource_type" in fields:
+        m = re.search(rf"\b{fields['resource_type']}\s*#?\s*([A-Za-z0-9\-]+)", text, flags=re.IGNORECASE)
+        if m:
+            token = m.group(1)
+            fields["resource_name"] = f"{fields['resource_type'].title()} {token}"
+            if token.isdigit():
+                fields["resource_id"] = int(token)
+    span = re.search(r"\bfrom\s+(.+?)\s+to\s+(.+?)(?=$|[,.])", text, flags=re.IGNORECASE)
+    if span:
+        fields["start_time"] = span.group(1).strip()
+        fields["end_time"] = span.group(2).strip()
+    return fields
+
+
+def _extract_project_code(text: str) -> str | None:
+    m = re.search(r"\b([A-Za-z]{2,10}-\d{1,6})\b", text)
+    return m.group(1) if m else None
+
+
+def _infer_expense_category(text: str) -> str | None:
+    lower = text.lower()
+    keywords = {
+        "hotel": "hotel",
+        "taxi": "taxi",
+        "meal": "meal",
+        "food": "meal",
+        "flight": "flight",
+        "airfare": "flight",
+        "train": "train",
+        "parking": "parking",
+    }
+    for word, category in keywords.items():
+        if re.search(rf"\b{re.escape(word)}\b", lower):
+            return category
+    return None
+
+
+def _extract_amount(text: str) -> float | None:
+    raw = text.replace(",", "")
+    matches = list(re.finditer(r"\d+(?:\.\d+)?", raw))
+    if not matches:
+        return None
+
+    best_value: float | None = None
+    best_score = -10
+    for m in matches:
+        value = float(m.group(0))
+        score = 0
+        context = raw[max(0, m.start() - 12) : min(len(raw), m.end() + 12)].lower()
+        wide_context = raw[max(0, m.start() - 20) : min(len(raw), m.end() + 20)].lower()
+        if any(token in context for token in ("$", "usd", "baht", "thb", "eur", "gbp", "jpy", "cost", "total", "amount")):
+            score += 2
+        months = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+        if value.is_integer() and 1900 <= int(value) <= 2100 and any(month in wide_context for month in months):
+            score -= 2
+        if value < 1:
+            score -= 1
+        if score > best_score or (score == best_score and (best_value is None or value > best_value)):
+            best_score = score
+            best_value = value
+    return best_value
+
+
+def _extract_iso_dates_from_text(text: str) -> list[str]:
+    matches: list[str] = []
+    patterns = [
+        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b",
+        r"\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b",
+    ]
+    for pattern in patterns:
+        for m in re.finditer(pattern, text):
+            iso = _parse_iso_date_strict(m.group(0))
+            if iso and iso not in matches:
+                matches.append(iso)
+    return matches
+
+
+def _looks_like_date_expression(text: str) -> bool:
+    lower = text.lower()
+    if re.search(r"\d", lower):
+        return True
+    if any(word in lower for word in ("today", "tomorrow", "yesterday", "next", "this", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")):
+        return True
+    if re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b", lower):
+        return True
+    return False
+
+
+def _parse_iso_date_strict(text: str) -> str | None:
+    candidates: list[str] = []
+    candidates.append(text)
+    patterns = [
+        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b",
+        r"\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b",
+    ]
+    for pattern in patterns:
+        for m in re.finditer(pattern, text):
+            candidates.append(m.group(0))
+
+    for candidate in candidates:
+        try:
+            dt = dateparser.parse(candidate, dayfirst=True, yearfirst=False, fuzzy=True)
+        except Exception:
+            dt = None
+        if dt:
+            return dt.date().isoformat()
+    return None
+
