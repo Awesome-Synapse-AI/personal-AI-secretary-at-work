@@ -133,15 +133,22 @@ function MessageBubble({ message, streaming }: { message: ChatMessage; streaming
         ) : null}
         {message.content || "..."}
         {message.actions?.length ? (
-          <div className="mt-2 space-y-1 text-xs text-emerald-200">
-            {message.actions.map((a, idx) => (
-              <div key={idx} className="flex items-center gap-2">
-                <CheckCircle2 size={14} />
-                <span>
-                  {a.type}: {a.status}
-                </span>
-              </div>
-            ))}
+          <div className="mt-2 space-y-1 text-xs">
+            {message.actions.map((a, idx) => {
+              const status = String(a.status || "").toLowerCase();
+              const isFailed = status.includes("fail") || status === "error";
+              const isSuccess = ["submitted", "ok", "success"].includes(status);
+              const color = isFailed ? "text-rose-300" : isSuccess ? "text-emerald-200" : "text-amber-200";
+              const Icon = isFailed ? TriangleAlert : CheckCircle2;
+              return (
+                <div key={idx} className={`flex items-center gap-2 ${color}`}>
+                  <Icon size={14} />
+                  <span className="underline">
+                    {a.type}: {a.status}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         ) : null}
       </div>

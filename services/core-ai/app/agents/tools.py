@@ -20,8 +20,15 @@ class ToolRunner:
         headers = {}
         if settings.service_auth_token:
             headers["Authorization"] = f"Bearer {settings.service_auth_token}"
+        request_kwargs: dict[str, Any] = {"headers": headers}
+        if method.upper() == "GET":
+            # Avoid sending a JSON body with GET; treat payload as query params.
+            if payload:
+                request_kwargs["params"] = payload
+        else:
+            request_kwargs["json"] = payload
         try:
-            response = await self._client.request(method, url, json=payload, headers=headers)
+            response = await self._client.request(method, url, **request_kwargs)
             response.raise_for_status()
             result = response.json() if response.content else {}
             return {"status": "ok", "result": result}

@@ -209,6 +209,15 @@ async def _handle_workspace(
         if pending["missing"]:
             return next_question(pending), pending, []
         action = await _submit_workspace_booking(pending, state)
+        if action.get("status") == "need_room_selection":
+            rooms = action.get("choices") or []
+            names = ", ".join([str(r.get("name")) for r in rooms if r.get("name")]) or "none available"
+            pending["missing"] = ["resource_name"]
+            prompt = (
+                f"I couldn't find that room. Available rooms: {names}. "
+                "Please tell me which room to book (name or number)."
+            )
+            return prompt, pending, []
         if action.get("status") != "submitted":
             return _workspace_failure(action), None, [action]
         return _workspace_success(pending), None, [action]
@@ -219,6 +228,15 @@ async def _handle_workspace(
         if pending["missing"]:
             return next_question(pending), pending, []
         action = await _submit_workspace_booking(pending, state)
+        if action.get("status") == "need_room_selection":
+            rooms = action.get("choices") or []
+            names = ", ".join([str(r.get("name")) for r in rooms if r.get("name")]) or "none available"
+            pending["missing"] = ["resource_name"]
+            prompt = (
+                f"I couldn't find that room. Available rooms: {names}. "
+                "Please tell me which room to book (name or number)."
+            )
+            return prompt, pending, []
         if action.get("status") != "submitted":
             return _workspace_failure(action), None, [action]
         return _workspace_success(pending), None, [action]
@@ -307,6 +325,37 @@ async def _submit_access_request(pending: dict[str, Any], state: ChatState) -> d
     return await _call_tool(state, "access", "/access-requests", payload, "access_request")
 
 
+async def _resolve_room_id(resource_name: str | None, resource_id: Any, state: ChatState) -> tuple[int | None, list[dict]]:
+    """
+    Resolve a room id using the workspace catalog when the user only provides a name.
+    Returns a tuple of (resolved_id, available_rooms) so the caller can ask for clarification.
+    """
+    rooms: list[dict] = []
+    if resource_id is not None:
+        try:
+            return int(resource_id), rooms
+        except (TypeError, ValueError):
+            return None, rooms
+    if not resource_name:
+        return None, rooms
+    lookup = await tool_runner.call("workspace", "GET", "/rooms", {})
+    if lookup.get("status") != "ok":
+        _add_event(state, "tool_error", {"service": "workspace", "error": lookup.get("error")})
+        return None, rooms
+    rooms = lookup.get("result", {}).get("rooms") or []
+    target = resource_name.strip().lower()
+    for room in rooms:
+        name = str(room.get("name") or "").strip().lower()
+        if name == target:
+            return room.get("id"), rooms  # type: ignore[return-value]
+    partial = [room for room in rooms if target in str(room.get("name") or "").strip().lower()]
+    if len(partial) == 1:
+        return partial[0].get("id"), rooms  # type: ignore[return-value]
+    if not partial and len(rooms) == 1:
+        return rooms[0].get("id"), rooms  # type: ignore[return-value]
+    return None, rooms
+
+
 async def _submit_workspace_booking(pending: dict[str, Any], state: ChatState) -> dict[str, Any]:
     filled = pending.get("filled", {})
     resource_type = (filled.get("resource_type") or "").lower()
@@ -318,7 +367,15 @@ async def _submit_workspace_booking(pending: dict[str, Any], state: ChatState) -
         return {"type": "workspace_booking", "status": "failed", "error": "Missing required fields"}
 
     if resource_type == "room":
-        path = f"/rooms/{resource_id}/book"
+        resolved_id, rooms = await _resolve_room_id(resource_name, resource_id, state)
+        if resolved_id is None:
+            return {
+                "type": "workspace_booking",
+                "status": "need_room_selection",
+                "error": "Room not found; please pick from the available rooms.",
+                "choices": rooms,
+            }
+        path = f"/rooms/{resolved_id}/book"
         payload = {"resource_name": resource_name, "start_time": start_time, "end_time": end_time}
     elif resource_type == "desk":
         path = "/desks/book"
