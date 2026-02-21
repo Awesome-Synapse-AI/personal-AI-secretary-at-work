@@ -9,6 +9,7 @@ from app.config import settings
 from app.observability import record_llm_error, record_llm_timing
 
 logger = structlog.get_logger("llm_client")
+MAX_OUTPUT_TOKENS = 1024
 
 
 @traceable(name="call_llm_json", run_type="llm")
@@ -109,6 +110,11 @@ async def _call_llm(
     if settings.llm_api_key:
         headers["Authorization"] = f"Bearer {settings.llm_api_key}"
 
+    # Cap generation to avoid runaway outputs.
+    # effective_max_tokens = min(max_tokens, MAX_OUTPUT_TOKENS)
+
+    effective_max_tokens = MAX_OUTPUT_TOKENS
+
     payload = {
         "model": settings.llm_model,
         "messages": [
@@ -116,7 +122,7 @@ async def _call_llm(
             {"role": "user", "content": user_message},
         ],
         "temperature": 0,
-        "max_tokens": max_tokens,
+        "max_tokens": effective_max_tokens,
     }
     if enforce_json:
         # OpenAI-compatible response_format plus Ollama-native format for stricter JSON.
