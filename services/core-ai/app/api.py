@@ -531,6 +531,35 @@ async def book_parking(payload: BookingRequestInput, session: Session = Depends(
     return {"status": "submitted", "booking": booking}
 
 
+def _booking_with_resource(session: Session, booking: Booking) -> dict:
+    name = None
+    if booking.resource_type == ResourceType.ROOM:
+        res = session.get(Room, booking.resource_id)
+        name = res.name if res else None
+    elif booking.resource_type == ResourceType.DESK:
+        res = session.get(Desk, booking.resource_id)
+        name = res.name if res else None
+    elif booking.resource_type == ResourceType.EQUIPMENT:
+        res = session.get(Equipment, booking.resource_id)
+        name = res.name if res else None
+    elif booking.resource_type == ResourceType.PARKING:
+        res = session.get(ParkingSpot, booking.resource_id)
+        name = res.name if res else None
+    payload = booking.dict()
+    payload["resource_name"] = name
+    return payload
+
+
+@router.get("/domain/bookings/me")
+async def bookings_me(
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(get_current_user),
+):
+    user_id = _current_user_id(user)
+    bookings = session.exec(select(Booking).where(Booking.user_id == user_id).order_by(Booking.created_at.desc())).all()
+    return {"bookings": [_booking_with_resource(session, b) for b in bookings]}
+
+
 # ---------- Leave ----------
 
 

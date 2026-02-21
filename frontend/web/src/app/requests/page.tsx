@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { APPROVALS_WS_URL } from "@/lib/config";
-import { AccessRequest, Expense, LeaveRequest, Ticket, TravelRequest } from "@/types/domain";
+import { AccessRequest, Expense, LeaveRequest, Ticket, TravelRequest, Booking } from "@/types/domain";
 import { Loader2, RefreshCw, Radio, CloudOff } from "lucide-react";
 
 interface RequestState {
@@ -12,9 +12,10 @@ interface RequestState {
   travel: TravelRequest[];
   access: AccessRequest[];
   tickets: Ticket[];
+  bookings: Booking[];
 }
 
-const initialState: RequestState = { leaves: [], expenses: [], travel: [], access: [], tickets: [] };
+const initialState: RequestState = { leaves: [], expenses: [], travel: [], access: [], tickets: [], bookings: [] };
 
 export default function RequestsPage() {
   const [data, setData] = useState<RequestState>(initialState);
@@ -24,14 +25,15 @@ export default function RequestsPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [leaves, expenses, travel, access, tickets] = await Promise.all([
+      const [leaves, expenses, travel, access, tickets, bookings] = await Promise.all([
         api.get<{ requests: LeaveRequest[] }>(`/domain/requests/me`).then((r) => r.requests),
         api.get<{ expenses: Expense[] }>(`/domain/expenses/me`).then((r) => r.expenses),
         api.get<{ travel_requests: TravelRequest[] }>(`/domain/travel-requests/me`).then((r) => r.travel_requests),
         api.get<{ access_requests: AccessRequest[] }>(`/domain/access-requests/me`).then((r) => r.access_requests),
         api.get<{ tickets: Ticket[] }>(`/domain/tickets/me`).then((r) => r.tickets),
+        api.get<{ bookings: Booking[] }>(`/domain/bookings/me`).then((r) => r.bookings),
       ]);
-      setData({ leaves, expenses, travel, access, tickets });
+      setData({ leaves, expenses, travel, access, tickets, bookings });
       setError(null);
     } catch (err: any) {
       console.error(err);
@@ -56,6 +58,13 @@ export default function RequestsPage() {
       { title: "Travel", items: data.travel, fields: (t: TravelRequest) => `${t.origin} -> ${t.destination} on ${t.departure_date}`, status: (t: TravelRequest) => t.status },
       { title: "Access", items: data.access, fields: (a: AccessRequest) => `${a.resource} - ${a.requested_role}`, status: (a: AccessRequest) => a.status },
       { title: "Tickets", items: data.tickets, fields: (t: Ticket) => `${t.type} - ${t.description}`, status: (t: Ticket) => t.status },
+      {
+        title: "Workspace Bookings",
+        items: data.bookings,
+        fields: (b: Booking) =>
+          `${b.resource_type} ${b.resource_name || b.resource_id} ${new Date(b.start_time).toLocaleString()} -> ${new Date(b.end_time).toLocaleString()}`,
+        status: (b: Booking) => b.status,
+      },
     ],
     [data]
   );
@@ -136,6 +145,7 @@ function useApprovalSocket(setData: (updater: (prev: RequestState) => RequestSta
             travel: [...prev.travel],
             access: [...prev.access],
             tickets: [...prev.tickets],
+            bookings: [...prev.bookings],
           };
           const target = cloneMap(next, payload.kind);
           if (!target) return prev;
@@ -158,6 +168,7 @@ function cloneMap(state: RequestState, kind: string | undefined) {
   if (kind === "travel") return state.travel;
   if (kind === "access") return state.access;
   if (kind === "ticket") return state.tickets;
+  if (kind === "booking") return state.bookings;
   return null;
 }
 

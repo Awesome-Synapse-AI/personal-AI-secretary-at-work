@@ -68,6 +68,19 @@ export interface AccessRequest {
   updated_at: string;
 }
 
+export interface Booking {
+  id: number;
+  user_id: string;
+  resource_type: string;
+  resource_id: number;
+  resource_name?: string | null;
+  start_time: string;
+  end_time: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DocumentSearchHit {
   document_id: number;
   title: string;
