@@ -78,7 +78,7 @@ FIELD_DESCRIPTIONS = {
     RequestType.TRAVEL: "origin, destination, departure_date (DD/MM/YYYY), return_date (DD/MM/YYYY), class",
     RequestType.ACCESS: "resource, requested_role (read/write/admin), justification",
     RequestType.TICKET: "subtype (it or facilities), description, location",
-    RequestType.WORKSPACE_BOOKING: "resource_type (room/desk/equipment/parking), resource_name, start_time (natural language ok), end_time (natural language ok), location, description",
+    RequestType.WORKSPACE_BOOKING: "resource_type (room/desk/equipment/parking), resource_name, start_time (include date if present), end_time (include date if present), location, description",
 }
 
 
@@ -191,13 +191,14 @@ def _classification_prompt(domain: str, allowed: list[RequestType]) -> str:
         f"Domain: {domain}. "
         f"request_type must be one of: {allowed_values}. "
         f"For each type, fields are: {details}. "
+        "If the user already names what to book (e.g., \"book a room\"), set resource_type accordingly and do not ask again. "
         "Use null for unknown values."
     )
 
 
 def _extraction_prompt(request_type: RequestType) -> str:
     field_desc = FIELD_DESCRIPTIONS[request_type]
-    return (
+    base = (
         "You extract fields for a single request type. "
         "Return only a single JSON object with keys request_type and fields. "
         "Do not include reasoning, code fences, or extra text. "
@@ -205,6 +206,24 @@ def _extraction_prompt(request_type: RequestType) -> str:
         f"fields must include: {field_desc}. "
         "Use null for unknown values."
     )
+    if request_type == RequestType.WORKSPACE_BOOKING:
+        # Nudge the model to properly pick resource_type, resource_name, and times.
+        examples = (
+            "Examples:\n"
+            'Input: "I want to reserve a meeting room from 9:00 a.m. to 12:00 p.m. on 18/Oct/2025"\n'
+            'Output: {"request_type":"workspace_booking","fields":{"resource_type":"room","resource_name":null,"resource_id":null,"start_time":"2025-10-18 09:00","end_time":"2025-10-18 12:00","location":null,"description":null}}\n'
+            'Input: "Book Orion room 2pm-3pm tomorrow"\n'
+            'Output: {"request_type":"workspace_booking","fields":{"resource_type":"room","resource_name":"Orion","resource_id":null,"start_time":"tomorrow 14:00","end_time":"tomorrow 15:00","location":null,"description":null}}'
+        )
+        rules = (
+            "Rules: resource_type must be one of room, desk, equipment, parking. "
+            "If the user says \"book a room\" or \"meeting room\" set resource_type=\"room\". "
+            "Do not copy the entire sentence into resource_name or start_time/end_time. "
+            "Combine the date with the times when possible (YYYY-MM-DD HH:MM 24h is preferred). "
+            "If you cannot find start_time or end_time, set them to null instead of echoing the request."
+        )
+        return base + " " + rules + " " + examples
+    return base
 
 
 def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | None) -> dict[str, Any]:
@@ -230,10 +249,39 @@ def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | 
             value = _normalize_requested_role(value)
         if req_enum == RequestType.TICKET and key == "subtype" and value is not None:
             value = _normalize_ticket_subtype(value)
-        if req_enum == RequestType.WORKSPACE_BOOKING and key == "resource_type" and value is not None:
-            value = _normalize_resource_type(value)
+        if req_enum == RequestType.WORKSPACE_BOOKING:
+            if key == "resource_type" and value is not None:
+                value = _normalize_resource_type(value)
+            if key in {"resource_name", "start_time", "end_time"} and isinstance(value, str):
+                if not _looks_like_workspace_value(key, value):
+                    value = None
         normalized[key] = value
     return normalized
+
+
+def _looks_like_workspace_value(field: str, value: str) -> bool:
+    """
+    Basic hygiene to avoid the model echoing the whole sentence into a field.
+    """
+    text = value.strip()
+    if not text or len(text) > 120:
+        return False
+    if field == "resource_name":
+        # allow alphanumerics/space/#+- and short names
+        return bool(re.match(r"^[A-Za-z0-9 #+-]{1,40}$", text))
+    if field in {"start_time", "end_time"}:
+        # must contain a digit to be considered a time stamp
+        return any(ch.isdigit() for ch in text)
+    return True
+
+
+def _merge_fields(*dicts: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for d in dicts:
+        for k, v in (d or {}).items():
+            if v is not None and _is_missing(merged.get(k)):
+                merged[k] = v
+    return merged
 
 
 def _missing_fields(pending: dict[str, Any]) -> list[str]:

@@ -14,6 +14,7 @@ from app.agents.clarification import (
     extract_fields,
     next_question,
     update_pending_request,
+    _merge_fields,
 )
 from app.agents.tools import tool_runner
 
@@ -120,7 +121,8 @@ async def _handle_hr(
             return next_question(pending), pending, []
         action = await _submit_leave_request(pending, state)
         if action.get("status") != "submitted":
-            return _leave_failure(action), None, [action]
+            prompt = _failure_followup(RequestType.LEAVE, pending, action.get("error"))
+            return prompt, pending, [action]
         return _leave_success(pending), None, [action]
 
     request_type, fields = await classify_request("hr", message)
@@ -130,7 +132,8 @@ async def _handle_hr(
             return next_question(pending), pending, []
         action = await _submit_leave_request(pending, state)
         if action.get("status") != "submitted":
-            return _leave_failure(action), None, [action]
+            prompt = _failure_followup(RequestType.LEAVE, pending, action.get("error"))
+            return prompt, pending, [action]
         return _leave_success(pending), None, [action]
 
     return _domain_intro("hr"), pending, []
@@ -147,11 +150,13 @@ async def _handle_ops(
         if pending.get("type") == RequestType.EXPENSE:
             action = await _submit_expense_request(pending, state)
             if action.get("status") != "submitted":
-                return _expense_failure(action), None, [action]
+                prompt = _failure_followup(RequestType.EXPENSE, pending, action.get("error"))
+                return prompt, pending, [action]
             return _expense_success(pending), None, [action]
         action = await _submit_travel_request(pending, state)
         if action.get("status") != "submitted":
-            return _travel_failure(action), None, [action]
+            prompt = _failure_followup(RequestType.TRAVEL, pending, action.get("error"))
+            return prompt, pending, [action]
         return _travel_success(pending), None, [action]
 
     request_type, fields = await classify_request("ops", message)
@@ -162,11 +167,13 @@ async def _handle_ops(
         if request_type == RequestType.EXPENSE:
             action = await _submit_expense_request(pending, state)
             if action.get("status") != "submitted":
-                return _expense_failure(action), None, [action]
+                prompt = _failure_followup(RequestType.EXPENSE, pending, action.get("error"))
+                return prompt, pending, [action]
             return _expense_success(pending), None, [action]
         action = await _submit_travel_request(pending, state)
         if action.get("status") != "submitted":
-            return _travel_failure(action), None, [action]
+            prompt = _failure_followup(RequestType.TRAVEL, pending, action.get("error"))
+            return prompt, pending, [action]
         return _travel_success(pending), None, [action]
 
     return _domain_intro("ops"), pending, []
@@ -182,8 +189,14 @@ async def _handle_it(
             return next_question(pending), pending, []
         if pending.get("type") == RequestType.ACCESS:
             action = await _submit_access_request(pending, state)
+            if action.get("status") != "submitted":
+                prompt = _failure_followup(RequestType.ACCESS, pending, action.get("error"))
+                return prompt, pending, [action]
             return _access_success(pending), None, [action]
         action = await _submit_ticket_request(pending, state)
+        if action.get("status") != "submitted":
+            prompt = _failure_followup(RequestType.TICKET, pending, action.get("error"))
+            return prompt, pending, [action]
         return _ticket_success(pending), None, [action]
 
     request_type, fields = await classify_request("it", message)
@@ -193,8 +206,14 @@ async def _handle_it(
             return next_question(pending), pending, []
         if request_type == RequestType.ACCESS:
             action = await _submit_access_request(pending, state)
+            if action.get("status") != "submitted":
+                prompt = _failure_followup(RequestType.ACCESS, pending, action.get("error"))
+                return prompt, pending, [action]
             return _access_success(pending), None, [action]
         action = await _submit_ticket_request(pending, state)
+        if action.get("status") != "submitted":
+            prompt = _failure_followup(RequestType.TICKET, pending, action.get("error"))
+            return prompt, pending, [action]
         return _ticket_success(pending), None, [action]
 
     return _domain_intro("it"), pending, []
@@ -207,7 +226,8 @@ async def _handle_workspace(
         updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
-            return next_question(pending), pending, []
+            prompt = await _workspace_prompt(pending, state)
+            return prompt, pending, []
         action = await _submit_workspace_booking(pending, state)
         if action.get("status") == "need_room_selection":
             rooms = action.get("choices") or []
@@ -219,14 +239,20 @@ async def _handle_workspace(
             )
             return prompt, pending, []
         if action.get("status") != "submitted":
+            prompt = await _workspace_followup(action, pending, state)
+            if prompt:
+                return prompt, pending, [action]
             return _workspace_failure(action), None, [action]
         return _workspace_success(pending), None, [action]
 
     request_type, fields = await classify_request("workspace", message)
     if request_type == RequestType.WORKSPACE_BOOKING:
-        pending = build_pending_request("workspace", request_type, fields)
+        # Heuristically backfill fields from the user's message to avoid asking obvious things again.
+        enriched_fields = _merge_fields(fields, _infer_workspace_fields(message))
+        pending = build_pending_request("workspace", request_type, enriched_fields)
         if pending["missing"]:
-            return next_question(pending), pending, []
+            prompt = await _workspace_prompt(pending, state)
+            return prompt, pending, []
         action = await _submit_workspace_booking(pending, state)
         if action.get("status") == "need_room_selection":
             rooms = action.get("choices") or []
@@ -238,10 +264,36 @@ async def _handle_workspace(
             )
             return prompt, pending, []
         if action.get("status") != "submitted":
+            prompt = await _workspace_followup(action, pending, state)
+            if prompt:
+                return prompt, pending, [action]
             return _workspace_failure(action), None, [action]
         return _workspace_success(pending), None, [action]
 
     return _domain_intro("workspace"), pending, []
+
+
+async def _workspace_prompt(pending: dict[str, Any], state: ChatState) -> str:
+    filled = pending.get("filled", {})
+    missing = pending.get("missing", [])
+    resource_type = (filled.get("resource_type") or "").lower()
+
+    if "resource_name" in missing and resource_type == "room":
+        rooms: list[dict] = []
+        try:
+            result = await tool_runner.call("workspace", "GET", "/rooms", {})
+            rooms = result.get("result", {}).get("rooms") or []
+        except Exception:
+            rooms = []
+        names = ", ".join([str(r.get("name") or r.get("id")) for r in rooms]) or "rooms are not available yet"
+        return f"Which room should I book? Available rooms: {names}."
+    if "resource_name" in missing and resource_type == "desk":
+        return "Which desk should I book (name or number)?"
+    if "resource_name" in missing:
+        return "Which resource should I book (e.g., Room 1, Desk #2)?"
+    if "start_time" in missing or "end_time" in missing:
+        return "What start and end time should I use? Please give both start and end."
+    return next_question(pending)
 
 
 async def _handle_doc_qa(
@@ -325,35 +377,38 @@ async def _submit_access_request(pending: dict[str, Any], state: ChatState) -> d
     return await _call_tool(state, "access", "/access-requests", payload, "access_request")
 
 
-async def _resolve_room_id(resource_name: str | None, resource_id: Any, state: ChatState) -> tuple[int | None, list[dict]]:
+async def _resolve_room_id(resource_name: str | None, resource_id: Any, state: ChatState) -> tuple[int | None, str | None, list[dict]]:
     """
     Resolve a room id using the workspace catalog when the user only provides a name.
-    Returns a tuple of (resolved_id, available_rooms) so the caller can ask for clarification.
+    Returns a tuple of (resolved_id, resolved_name, available_rooms) so the caller can ask for clarification.
     """
     rooms: list[dict] = []
     if resource_id is not None:
         try:
-            return int(resource_id), rooms
+            rid = int(resource_id)
+            return rid, resource_name, rooms
         except (TypeError, ValueError):
-            return None, rooms
+            return None, resource_name, rooms
     if not resource_name:
-        return None, rooms
+        return None, None, rooms
     lookup = await tool_runner.call("workspace", "GET", "/rooms", {})
     if lookup.get("status") != "ok":
         _add_event(state, "tool_error", {"service": "workspace", "error": lookup.get("error")})
-        return None, rooms
+        return None, None, rooms
     rooms = lookup.get("result", {}).get("rooms") or []
-    target = resource_name.strip().lower()
+    target = resource_name.strip().lower() if resource_name else ""
     for room in rooms:
         name = str(room.get("name") or "").strip().lower()
         if name == target:
-            return room.get("id"), rooms  # type: ignore[return-value]
+            return room.get("id"), room.get("name"), rooms  # type: ignore[return-value]
     partial = [room for room in rooms if target in str(room.get("name") or "").strip().lower()]
     if len(partial) == 1:
-        return partial[0].get("id"), rooms  # type: ignore[return-value]
+        r = partial[0]
+        return r.get("id"), r.get("name"), rooms  # type: ignore[return-value]
     if not partial and len(rooms) == 1:
-        return rooms[0].get("id"), rooms  # type: ignore[return-value]
-    return None, rooms
+        r = rooms[0]
+        return r.get("id"), r.get("name"), rooms  # type: ignore[return-value]
+    return None, None, rooms
 
 
 async def _submit_workspace_booking(pending: dict[str, Any], state: ChatState) -> dict[str, Any]:
@@ -367,7 +422,7 @@ async def _submit_workspace_booking(pending: dict[str, Any], state: ChatState) -
         return {"type": "workspace_booking", "status": "failed", "error": "Missing required fields"}
 
     if resource_type == "room":
-        resolved_id, rooms = await _resolve_room_id(resource_name, resource_id, state)
+        resolved_id, resolved_name, rooms = await _resolve_room_id(resource_name, resource_id, state)
         if resolved_id is None:
             return {
                 "type": "workspace_booking",
@@ -375,8 +430,12 @@ async def _submit_workspace_booking(pending: dict[str, Any], state: ChatState) -
                 "error": "Room not found; please pick from the available rooms.",
                 "choices": rooms,
             }
+        # persist resolved values so downstream success/failure messages have them
+        pending.setdefault("filled", {})["resource_id"] = resolved_id
+        if resolved_name:
+            pending["filled"]["resource_name"] = resolved_name
         path = f"/rooms/{resolved_id}/book"
-        payload = {"resource_name": resource_name, "start_time": start_time, "end_time": end_time}
+        payload = {"resource_name": resolved_name or resource_name, "start_time": start_time, "end_time": end_time}
     elif resource_type == "desk":
         path = "/desks/book"
         payload = {"desk_id": resource_id, "resource_name": resource_name, "start_time": start_time, "end_time": end_time}
@@ -430,6 +489,45 @@ async def _call_tool(
         except Exception as exc:  # pragma: no cover - network errors
             _add_event(state, "tool_error", {"service": service, "error": str(exc)})
             return {"type": action_type, "status": "failed", "payload": payload}
+
+
+def _required_fields(req_enum: RequestType | None, filled: dict[str, Any] | None = None) -> list[str]:
+    filled = filled or {}
+    if req_enum == RequestType.LEAVE:
+        return ["leave_type", "start_date", "end_date"]
+    if req_enum == RequestType.EXPENSE:
+        return ["amount", "currency", "date", "category"]
+    if req_enum == RequestType.TRAVEL:
+        return ["origin", "destination", "departure_date", "return_date"]
+    if req_enum == RequestType.ACCESS:
+        return ["resource", "requested_role", "justification"]
+    if req_enum == RequestType.TICKET:
+        required = ["subtype", "description"]
+        if filled.get("subtype") == "facilities":
+            required.append("location")
+        return required
+    if req_enum == RequestType.WORKSPACE_BOOKING:
+        return ["resource_type", "resource_name", "start_time", "end_time"]
+    return []
+
+
+def _failure_followup(
+    req_enum: RequestType | None,
+    pending: dict[str, Any],
+    error: object,
+    hint: str | None = None,
+) -> str:
+    fields = _required_fields(req_enum, pending.get("filled", {}))
+    if fields:
+        pending["missing"] = fields
+    message = "I couldn't submit that yet."
+    if hint:
+        message += f" {hint}"
+    elif error:
+        message += f" {error}"
+    if fields:
+        message += f" Please provide/confirm: {', '.join(fields)}."
+    return message
 
 
 def _leave_success(pending: dict[str, Any]) -> str:
@@ -486,11 +584,45 @@ def _access_success(pending: dict[str, Any]) -> str:
 
 def _workspace_success(pending: dict[str, Any]) -> str:
     filled = pending["filled"]
+    name = filled.get("resource_name") or filled.get("resource_id")
     return (
         "Booking confirmed for "
-        f"{filled.get('resource_type')} {filled.get('resource_id')} "
+        f"{filled.get('resource_type')} {name} "
         f"from {filled.get('start_time')} to {filled.get('end_time')}."
     )
+
+
+async def _workspace_followup(action: dict[str, Any], pending: dict[str, Any], state: ChatState) -> str | None:
+    err = action.get("error")
+    if isinstance(err, dict):
+        available = err.get("available") or []
+        if available:
+            names = ", ".join([str(a.get("name") or a.get("id")) for a in available])
+            pending["missing"] = ["resource_name"]
+            return f"That slot is already booked. Available options right now: {names}. Which one should I reserve?"
+    if isinstance(err, str):
+        low = err.lower()
+        if "parse" in low and "time" in low:
+            pending["missing"] = ["start_time", "end_time"]
+            return "I couldn't understand the start/end time. Please give exact start and end (e.g., 2026-02-22 09:00 to 11:00)."
+        if "end time must be after start time" in low:
+            pending["missing"] = ["start_time", "end_time"]
+            return "End time needs to be after start. What start and end times should I use?"
+        if "resource name not found" in low or "room not found" in low:
+            rooms = []
+            try:
+                result = await tool_runner.call("workspace", "GET", "/rooms", {})
+                rooms = result.get("result", {}).get("rooms") or []
+            except Exception:
+                rooms = []
+            if rooms:
+                names = ", ".join([str(r.get("name") or r.get("id")) for r in rooms])
+                pending["missing"] = ["resource_name"]
+                return f"I couldn't find that room. Available rooms: {names}. Which should I book?"
+    # Fallback: ask for all required fields again
+    req_enum = _as_request_type(pending.get("type"))
+    hint = err if isinstance(err, str) else None
+    return _failure_followup(req_enum, pending, err, hint)
 
 
 def _workspace_failure(action: dict[str, Any]) -> str:
