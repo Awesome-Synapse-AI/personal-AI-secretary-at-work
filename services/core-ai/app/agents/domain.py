@@ -15,6 +15,8 @@ from app.agents.clarification import (
     next_question,
     update_pending_request,
     _merge_fields,
+    _is_missing,
+    _normalize_resource_type,
 )
 from app.agents.tools import tool_runner
 
@@ -243,12 +245,14 @@ async def _handle_workspace(
             if prompt:
                 return prompt, pending, [action]
             return _workspace_failure(action), None, [action]
+        _apply_booking_result_to_pending(pending, action)
         return _workspace_success(pending), None, [action]
 
     request_type, fields = await classify_request("workspace", message)
     if request_type == RequestType.WORKSPACE_BOOKING:
-        # Heuristically backfill fields from the user's message to avoid asking obvious things again.
-        enriched_fields = _merge_fields(fields, _infer_workspace_fields(message))
+        # Prefer LLM extraction over heuristics for workspace details.
+        llm_fields = await extract_fields(RequestType.WORKSPACE_BOOKING, message)
+        enriched_fields = _merge_fields(fields, llm_fields)
         pending = build_pending_request("workspace", request_type, enriched_fields)
         if pending["missing"]:
             prompt = await _workspace_prompt(pending, state)
@@ -268,6 +272,7 @@ async def _handle_workspace(
             if prompt:
                 return prompt, pending, [action]
             return _workspace_failure(action), None, [action]
+        _apply_booking_result_to_pending(pending, action)
         return _workspace_success(pending), None, [action]
 
     return _domain_intro("workspace"), pending, []
@@ -279,21 +284,46 @@ async def _workspace_prompt(pending: dict[str, Any], state: ChatState) -> str:
     resource_type = (filled.get("resource_type") or "").lower()
 
     if "resource_name" in missing and resource_type == "room":
-        rooms: list[dict] = []
-        try:
-            result = await tool_runner.call("workspace", "GET", "/rooms", {})
-            rooms = result.get("result", {}).get("rooms") or []
-        except Exception:
-            rooms = []
-        names = ", ".join([str(r.get("name") or r.get("id")) for r in rooms]) or "rooms are not available yet"
+        names = _resource_suggestions("rooms", await _list_resources("room"))
         return f"Which room should I book? Available rooms: {names}."
     if "resource_name" in missing and resource_type == "desk":
-        return "Which desk should I book (name or number)?"
+        names = _resource_suggestions("desks", await _list_resources("desk"))
+        return f"Which desk should I book? Available desks: {names}."
+    if "resource_name" in missing and resource_type == "equipment":
+        names = _resource_suggestions("equipment", await _list_resources("equipment"))
+        return f"Which equipment should I reserve? Available equipment: {names}."
+    if "resource_name" in missing and resource_type == "parking":
+        names = _resource_suggestions("parking", await _list_resources("parking"))
+        return f"Which parking spot should I book? Available spots: {names}."
     if "resource_name" in missing:
         return "Which resource should I book (e.g., Room 1, Desk #2)?"
     if "start_time" in missing or "end_time" in missing:
         return "What start and end time should I use? Please give both start and end."
     return next_question(pending)
+
+
+async def _list_resources(resource_type: str) -> list[dict]:
+    key_map = {
+        "room": "rooms",
+        "desk": "desks",
+        "equipment": "equipment",
+        "parking": "parking",
+    }
+    key = key_map.get(resource_type)
+    path = f"/{key}" if key else None
+    if not path:
+        return []
+    try:
+        result = await tool_runner.call("workspace", "GET", path, {})
+        payload = result.get("result", {})
+        return payload.get(key) or []
+    except Exception:
+        return []
+
+
+def _resource_suggestions(label: str, items: list[dict]) -> str:
+    names = ", ".join([str(i.get("name") or i.get("id")) for i in items]) if items else ""
+    return names or f"{label} are not available yet"
 
 
 async def _handle_doc_qa(
@@ -409,6 +439,17 @@ async def _resolve_room_id(resource_name: str | None, resource_id: Any, state: C
         r = rooms[0]
         return r.get("id"), r.get("name"), rooms  # type: ignore[return-value]
     return None, None, rooms
+
+
+def _apply_booking_result_to_pending(pending: dict[str, Any], action: dict[str, Any]) -> None:
+    result = action.get("result") or {}
+    booking = result.get("booking") if isinstance(result, dict) else None
+    if not isinstance(booking, dict):
+        return
+    filled = pending.setdefault("filled", {})
+    for key in ("resource_id", "resource_type", "start_time", "end_time"):
+        if booking.get(key) and _is_missing(filled.get(key)):
+            filled[key] = booking.get(key)
 
 
 async def _submit_workspace_booking(pending: dict[str, Any], state: ChatState) -> dict[str, Any]:
@@ -609,16 +650,13 @@ async def _workspace_followup(action: dict[str, Any], pending: dict[str, Any], s
             pending["missing"] = ["start_time", "end_time"]
             return "End time needs to be after start. What start and end times should I use?"
         if "resource name not found" in low or "room not found" in low:
-            rooms = []
-            try:
-                result = await tool_runner.call("workspace", "GET", "/rooms", {})
-                rooms = result.get("result", {}).get("rooms") or []
-            except Exception:
-                rooms = []
-            if rooms:
-                names = ", ".join([str(r.get("name") or r.get("id")) for r in rooms])
+            resource_type = (pending.get("filled", {}).get("resource_type") or "room").lower()
+            items = await _list_resources(resource_type)
+            if items:
+                names = ", ".join([str(r.get("name") or r.get("id")) for r in items])
+                label = "rooms" if resource_type == "room" else ("desks" if resource_type == "desk" else ("equipment" if resource_type == "equipment" else "parking"))
                 pending["missing"] = ["resource_name"]
-                return f"I couldn't find that room. Available rooms: {names}. Which should I book?"
+                return f"I couldn't find that {resource_type}. Available {label}: {names}. Which should I book?"
     # Fallback: ask for all required fields again
     req_enum = _as_request_type(pending.get("type"))
     hint = err if isinstance(err, str) else None
@@ -658,7 +696,11 @@ async def _extract_pending_updates(pending: dict[str, Any], message: str) -> dic
             if value is not None:
                 merged[key] = value
 
-    inferred = _infer_fields_from_message(request_type, message, pending)
+    if request_type == RequestType.WORKSPACE_BOOKING:
+        # Only fall back to heuristics if the LLM didn't extract anything useful.
+        inferred = {} if merged else _infer_workspace_fields(message)
+    else:
+        inferred = _infer_fields_from_message(request_type, message, pending)
     for key, value in inferred.items():
         if value is not None and merged.get(key) is None:
             merged[key] = value
@@ -867,22 +909,94 @@ def _infer_ticket_fields(text: str) -> dict[str, Any]:
 def _infer_workspace_fields(text: str) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     low = text.lower()
-    for value in ("room", "desk", "equipment", "parking"):
-        if value in low:
-            fields["resource_type"] = value
-            break
-    if "resource_type" in fields:
-        m = re.search(rf"\b{fields['resource_type']}\s*#?\s*([A-Za-z0-9\-]+)", text, flags=re.IGNORECASE)
-        if m:
-            token = m.group(1)
-            fields["resource_name"] = f"{fields['resource_type'].title()} {token}"
-            if token.isdigit():
-                fields["resource_id"] = int(token)
-    span = re.search(r"\bfrom\s+(.+?)\s+to\s+(.+?)(?=$|[,.])", text, flags=re.IGNORECASE)
+    resource_type = _infer_workspace_resource_type(low)
+    if resource_type:
+        fields["resource_type"] = resource_type
+
+    name = None
+    # Patterns like "room 12", "desk #A3", "parking spot B2"
+    m = re.search(r"\b(room|desk|equipment|parking|spot)\s*(?:#|no\.|number|id)?\s*([A-Za-z0-9][A-Za-z0-9\-]*)", text, flags=re.IGNORECASE)
+    if m:
+        rtype = _normalize_resource_type(m.group(1))
+        token = m.group(2)
+        if rtype:
+            fields.setdefault("resource_type", rtype)
+        if _valid_resource_token(token):
+            name = token
+    # Patterns like "Orion room", "Zephyr desk"
+    m2 = re.search(r"\b([A-Za-z0-9][A-Za-z0-9\-]+)\s+(room|desk|spot)\b", text, flags=re.IGNORECASE)
+    if m2 and not name:
+        token = m2.group(1)
+        rtype = _normalize_resource_type(m2.group(2))
+        if rtype:
+            fields.setdefault("resource_type", rtype)
+        if _valid_resource_token(token):
+            name = token
+
+    if name:
+        fields["resource_name"] = name
+        if name.isdigit():
+            fields["resource_id"] = int(name)
+
+    # Time range: "from X to Y" or "X-Y"
+    span = re.search(r"\b(?:from|between)\s+(.+?)\s+(?:to|and|until)\s+(.+?)(?=$|[,.])", text, flags=re.IGNORECASE)
+    if not span:
+        span = re.search(r"\b(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|to|until)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)", text, flags=re.IGNORECASE)
     if span:
         fields["start_time"] = span.group(1).strip()
         fields["end_time"] = span.group(2).strip()
+    else:
+        single = re.search(r"\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b", text, flags=re.IGNORECASE)
+        if single:
+            fields["start_time"] = single.group(1).strip()
+
+    # If a single date is present, attach it to times if they don't already contain a date.
+    dates = _extract_iso_dates_from_text(text)
+    if dates:
+        date = dates[0]
+        if fields.get("start_time") and not _contains_date_token(fields["start_time"]):
+            fields["start_time"] = f"{date} {fields['start_time']}"
+        if fields.get("end_time") and not _contains_date_token(fields["end_time"]):
+            fields["end_time"] = f"{date} {fields['end_time']}"
     return fields
+
+
+def _infer_workspace_resource_type(text: str) -> str | None:
+    synonyms = {
+        "room": ["room", "meeting room", "conference room", "boardroom"],
+        "desk": ["desk", "hot desk", "workstation", "seat", "cubicle"],
+        "equipment": ["equipment", "projector", "monitor", "laptop", "whiteboard", "speaker"],
+        "parking": ["parking", "parking spot", "parking space", "garage", "car park"],
+    }
+    for rtype, words in synonyms.items():
+        if any(word in text for word in words):
+            return rtype
+    return None
+
+
+def _contains_date_token(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _valid_resource_token(token: str) -> bool:
+    stop = {
+        "book",
+        "booking",
+        "reserve",
+        "reservation",
+        "want",
+        "need",
+        "a",
+        "the",
+        "my",
+    }
+    return token.lower() not in stop
 
 
 def _extract_project_code(text: str) -> str | None:
@@ -938,6 +1052,7 @@ def _extract_iso_dates_from_text(text: str) -> list[str]:
     matches: list[str] = []
     patterns = [
         r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        r"\b\d{1,2}[/-][A-Za-z]{3,9}[/-]\d{2,4}\b",
         r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b",
         r"\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b",
     ]
@@ -965,6 +1080,7 @@ def _parse_iso_date_strict(text: str) -> str | None:
     candidates.append(text)
     patterns = [
         r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        r"\b\d{1,2}[/-][A-Za-z]{3,9}[/-]\d{2,4}\b",
         r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b",
         r"\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b",
     ]

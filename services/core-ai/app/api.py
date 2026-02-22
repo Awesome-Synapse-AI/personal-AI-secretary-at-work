@@ -416,6 +416,24 @@ async def list_rooms(session: Session = Depends(get_session)):
     return {"rooms": rooms}
 
 
+@router.get("/domain/desks")
+async def list_desks(session: Session = Depends(get_session)):
+    desks = session.exec(select(Desk)).all()
+    return {"desks": desks}
+
+
+@router.get("/domain/equipment")
+async def list_equipment(session: Session = Depends(get_session)):
+    equipment = session.exec(select(Equipment)).all()
+    return {"equipment": equipment}
+
+
+@router.get("/domain/parking")
+async def list_parking(session: Session = Depends(get_session)):
+    spots = session.exec(select(ParkingSpot)).all()
+    return {"parking": spots}
+
+
 @router.post("/domain/rooms/{room_id}/book")
 async def book_room(room_id: int, payload: BookingRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)):
     user_id = _current_user_id(user)

@@ -142,7 +142,7 @@ async def classify_request(domain: str, message: str) -> tuple[RequestType | Non
         logger.warning("Clarify classify_request invalid type %s for domain %s", request_type, domain)
         print(f"Clarify classify_request invalid type {request_type} for domain {domain}", flush=True)
         return _heuristic_classify_request(domain, message)
-    fields = payload.get("fields", {})
+    fields = _filter_fields_by_evidence(request_type_enum, payload.get("fields", {}), message)
     logger.info("Clarify classify_request payload: %s", payload)
     print(f"Clarify classify_request payload: {payload}", flush=True)
     return request_type_enum, _normalize_fields(request_type_enum, fields)
@@ -168,7 +168,7 @@ async def extract_fields(request_type: RequestType | str, message: str) -> dict[
             logger.warning("Clarify extract_fields mismatched type %s (expected %s)", declared, req_enum)
             print(f"Clarify extract_fields mismatched type {declared} expected {req_enum}", flush=True)
             return {}
-    fields = payload.get("fields", {})
+    fields = _filter_fields_by_evidence(req_enum, payload.get("fields", {}), message)
     logger.info("Clarify extract_fields payload: %s", payload)
     print(f"Clarify extract_fields payload: {payload}", flush=True)
     return _normalize_fields(req_enum, fields)
@@ -192,6 +192,8 @@ def _classification_prompt(domain: str, allowed: list[RequestType]) -> str:
         f"request_type must be one of: {allowed_values}. "
         f"For each type, fields are: {details}. "
         "If the user already names what to book (e.g., \"book a room\"), set resource_type accordingly and do not ask again. "
+        "Resource type synonyms: meeting room/conference room/boardroom -> room; hot desk/workstation -> desk; "
+        "projector/monitor/laptop/whiteboard -> equipment; parking spot/parking space/garage -> parking. "
         "Use null for unknown values."
     )
 
@@ -206,24 +208,87 @@ def _extraction_prompt(request_type: RequestType) -> str:
         f"fields must include: {field_desc}. "
         "Use null for unknown values."
     )
+    guidance = _extraction_guidance(request_type)
+    return base + (" " + guidance if guidance else "")
+
+
+def _extraction_guidance(request_type: RequestType) -> str:
+    if request_type == RequestType.LEAVE:
+        return (
+            "Rules: leave_type should be one of annual, sick, unpaid, business, wedding, bereavement. "
+            "Prefer explicit dates; if a range is given, map to start_date and end_date. "
+            "Examples:\n"
+            'Input: "I need sick leave from 12/03/2026 to 13/03/2026"\n'
+            'Output: {"request_type":"leave","fields":{"leave_type":"sick","start_date":"2026-03-12","end_date":"2026-03-13","reason":null}}\n'
+            'Input: "Annual leave on 2026-04-10"\n'
+            'Output: {"request_type":"leave","fields":{"leave_type":"annual","start_date":"2026-04-10","end_date":"2026-04-10","reason":null}}\n'
+            'Input: "Unpaid leave 2026-05-01 for a family matter"\n'
+            'Output: {"request_type":"leave","fields":{"leave_type":"unpaid","start_date":"2026-05-01","end_date":"2026-05-01","reason":"family matter"}}'
+        )
+    if request_type == RequestType.EXPENSE:
+        return (
+            "Rules: amount must be numeric; currency should be a 3-letter code when mentioned. "
+            "Examples:\n"
+            'Input: "Log a $45 taxi from yesterday"\n'
+            'Output: {"request_type":"expense","fields":{"amount":45,"currency":"USD","date":"2026-02-20","category":"taxi","project_code":null}}\n'
+            'Input: "Expense 1200 THB meal on 2026-02-18"\n'
+            'Output: {"request_type":"expense","fields":{"amount":1200,"currency":"THB","date":"2026-02-18","category":"meal","project_code":null}}\n'
+            'Input: "Reimburse 30 EUR train ticket, project AB-12, on 2026-03-04"\n'
+            'Output: {"request_type":"expense","fields":{"amount":30,"currency":"EUR","date":"2026-03-04","category":"train","project_code":"AB-12"}}'
+        )
+    if request_type == RequestType.TRAVEL:
+        return (
+            "Rules: origin and destination must be cities/airports; use departure_date and return_date when a range is given. "
+            "Examples:\n"
+            'Input: "Book travel from NYC to LAX Mar 1-5"\n'
+            'Output: {"request_type":"travel","fields":{"origin":"NYC","destination":"LAX","departure_date":"2026-03-01","return_date":"2026-03-05","class":null}}\n'
+            'Input: "Flight Bangkok to Tokyo on 2026-03-20 return 2026-03-25, business class"\n'
+            'Output: {"request_type":"travel","fields":{"origin":"Bangkok","destination":"Tokyo","departure_date":"2026-03-20","return_date":"2026-03-25","class":"business"}}\n'
+            'Input: "Travel to Singapore from Kuala Lumpur on 2026-04-01"\n'
+            'Output: {"request_type":"travel","fields":{"origin":"Kuala Lumpur","destination":"Singapore","departure_date":"2026-04-01","return_date":null,"class":null}}'
+        )
+    if request_type == RequestType.ACCESS:
+        return (
+            "Rules: requested_role should be read/write/admin. "
+            "Examples:\n"
+            'Input: "Give me write access to repo analytics for reporting"\n'
+            'Output: {"request_type":"access","fields":{"resource":"repo analytics","requested_role":"write","justification":"for reporting"}}\n'
+            'Input: "Need read access to finance-dashboard"\n'
+            'Output: {"request_type":"access","fields":{"resource":"finance-dashboard","requested_role":"read","justification":null}}\n'
+            'Input: "Admin access to Jira because I manage the project"\n'
+            'Output: {"request_type":"access","fields":{"resource":"Jira","requested_role":"admin","justification":"manage the project"}}'
+        )
+    if request_type == RequestType.TICKET:
+        return (
+            "Rules: subtype is it or facilities; description should summarize the issue. "
+            "Examples:\n"
+            'Input: "AC broken in Room 12"\n'
+            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"AC broken","location":"Room 12"}}\n'
+            'Input: "VPN keeps dropping on my laptop"\n'
+            'Output: {"request_type":"ticket","fields":{"subtype":"it","description":"VPN keeps dropping","location":null}}\n'
+            'Input: "Projector not working in Meeting Room A"\n'
+            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"Projector not working","location":"Meeting Room A"}}'
+        )
     if request_type == RequestType.WORKSPACE_BOOKING:
-        # Nudge the model to properly pick resource_type, resource_name, and times.
-        examples = (
+        return (
+            "Rules: resource_type must be one of room, desk, equipment, parking. "
+            "If the user says \"book a room\" or \"meeting room\" set resource_type=\"room\". "
+            "If the user mentions hot desk/workstation set resource_type=\"desk\". "
+            "If the user mentions projector/monitor/laptop/whiteboard set resource_type=\"equipment\". "
+            "If the user mentions parking spot/parking space/garage set resource_type=\"parking\". "
+            "Only set resource_name when the user explicitly names a specific resource (e.g., \"Orion\", \"Desk A3\", \"B2\"). "
+            "Do not copy the entire sentence into resource_name or start_time/end_time. "
+            "Combine the date with the times when possible (YYYY-MM-DD HH:MM 24h is preferred). "
+            "If you cannot find start_time or end_time, set them to null instead of echoing the request. "
             "Examples:\n"
             'Input: "I want to reserve a meeting room from 9:00 a.m. to 12:00 p.m. on 18/Oct/2025"\n'
             'Output: {"request_type":"workspace_booking","fields":{"resource_type":"room","resource_name":null,"resource_id":null,"start_time":"2025-10-18 09:00","end_time":"2025-10-18 12:00","location":null,"description":null}}\n'
-            'Input: "Book Orion room 2pm-3pm tomorrow"\n'
-            'Output: {"request_type":"workspace_booking","fields":{"resource_type":"room","resource_name":"Orion","resource_id":null,"start_time":"tomorrow 14:00","end_time":"tomorrow 15:00","location":null,"description":null}}'
+            'Input: "Reserve a hot desk on 2026-03-25 from 09:00 to 12:00"\n'
+            'Output: {"request_type":"workspace_booking","fields":{"resource_type":"desk","resource_name":null,"resource_id":null,"start_time":"2026-03-25 09:00","end_time":"2026-03-25 12:00","location":null,"description":null}}\n'
+            'Input: "Reserve parking spot B2 on 2026-03-26 08:00-10:00"\n'
+            'Output: {"request_type":"workspace_booking","fields":{"resource_type":"parking","resource_name":"B2","resource_id":null,"start_time":"2026-03-26 08:00","end_time":"2026-03-26 10:00","location":null,"description":null}}'
         )
-        rules = (
-            "Rules: resource_type must be one of room, desk, equipment, parking. "
-            "If the user says \"book a room\" or \"meeting room\" set resource_type=\"room\". "
-            "Do not copy the entire sentence into resource_name or start_time/end_time. "
-            "Combine the date with the times when possible (YYYY-MM-DD HH:MM 24h is preferred). "
-            "If you cannot find start_time or end_time, set them to null instead of echoing the request."
-        )
-        return base + " " + rules + " " + examples
-    return base
+    return ""
 
 
 def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | None) -> dict[str, Any]:
@@ -257,6 +322,121 @@ def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | 
                     value = None
         normalized[key] = value
     return normalized
+
+
+def _filter_fields_by_evidence(
+    req_enum: RequestType | None, fields: dict[str, Any] | None, message: str
+) -> dict[str, Any]:
+    if not req_enum or not isinstance(fields, dict):
+        return {}
+    lower = (message or "").lower()
+    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", message or "")]
+
+    def _num_in_text(val: Any) -> bool:
+        if val is None:
+            return False
+        try:
+            num = float(val)
+        except Exception:
+            return False
+        return any(abs(num - n) < 0.01 for n in nums)
+
+    def _has_substring(val: Any) -> bool:
+        return isinstance(val, str) and val.strip().lower() in lower
+
+    def _has_date_evidence() -> bool:
+        if re.search(r"\b\d{4}-\d{2}-\d{2}\b", lower):
+            return True
+        if re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", lower):
+            return True
+        if re.search(r"\b\d{1,2}[/-][A-Za-z]{3,9}[/-]\d{2,4}\b", lower):
+            return True
+        if re.search(r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b", lower):
+            return True
+        if re.search(r"\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b", lower):
+            return True
+        if any(word in lower for word in ("today", "tomorrow", "yesterday", "next", "this")):
+            return True
+        return False
+
+    def _has_time_evidence() -> bool:
+        return bool(re.search(r"\b\d{1,2}(?::\d{2})?\s*(am|pm)?\b", lower))
+
+    def _has_currency_evidence(val: Any) -> bool:
+        if not isinstance(val, str):
+            return False
+        code = val.strip().upper()
+        symbols = {"USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "THB": "฿"}
+        if code in symbols and symbols[code] in message:
+            return True
+        return bool(re.search(rf"\b{re.escape(code)}\b", lower))
+
+    def _has_project_code() -> bool:
+        return bool(re.search(r"\b[A-Za-z]{2,10}-\d{1,6}\b", message or ""))
+
+    def _has_role_evidence(val: Any) -> bool:
+        if not isinstance(val, str):
+            return False
+        return any(word in lower for word in ("read", "write", "admin", "viewer", "editor", "owner"))
+
+    def _has_resource_type(val: Any) -> bool:
+        if not isinstance(val, str):
+            return False
+        return any(word in lower for word in (val.lower(), "room", "desk", "equipment", "parking", "spot"))
+
+    cleaned = dict(fields)
+    if req_enum == RequestType.EXPENSE:
+        if not _num_in_text(cleaned.get("amount")):
+            cleaned["amount"] = None
+        if not _has_currency_evidence(cleaned.get("currency")):
+            cleaned["currency"] = None
+        if not _has_date_evidence():
+            cleaned["date"] = None
+        if cleaned.get("category") and not _has_substring(cleaned.get("category")):
+            cleaned["category"] = None
+        if cleaned.get("project_code") and not _has_project_code():
+            cleaned["project_code"] = None
+    elif req_enum == RequestType.LEAVE:
+        if cleaned.get("leave_type") and not _has_substring(cleaned.get("leave_type")):
+            cleaned["leave_type"] = None
+        if not _has_date_evidence():
+            cleaned["start_date"] = None
+            cleaned["end_date"] = None
+        if cleaned.get("reason") and not _has_substring(cleaned.get("reason")):
+            cleaned["reason"] = None
+    elif req_enum == RequestType.TRAVEL:
+        if cleaned.get("origin") and not _has_substring(cleaned.get("origin")):
+            cleaned["origin"] = None
+        if cleaned.get("destination") and not _has_substring(cleaned.get("destination")):
+            cleaned["destination"] = None
+        if not _has_date_evidence():
+            cleaned["departure_date"] = None
+            cleaned["return_date"] = None
+        if cleaned.get("class") and not _has_substring(cleaned.get("class")):
+            cleaned["class"] = None
+    elif req_enum == RequestType.ACCESS:
+        if cleaned.get("resource") and not _has_substring(cleaned.get("resource")):
+            cleaned["resource"] = None
+        if cleaned.get("requested_role") and not _has_role_evidence(cleaned.get("requested_role")):
+            cleaned["requested_role"] = None
+        if cleaned.get("justification") and not _has_substring(cleaned.get("justification")):
+            cleaned["justification"] = None
+    elif req_enum == RequestType.TICKET:
+        if cleaned.get("subtype") and not _has_substring(cleaned.get("subtype")):
+            cleaned["subtype"] = None
+        if cleaned.get("description") and not _has_substring(cleaned.get("description")):
+            cleaned["description"] = None
+        if cleaned.get("location") and not _has_substring(cleaned.get("location")):
+            cleaned["location"] = None
+    elif req_enum == RequestType.WORKSPACE_BOOKING:
+        if cleaned.get("resource_type") and not _has_resource_type(cleaned.get("resource_type")):
+            cleaned["resource_type"] = None
+        if cleaned.get("resource_name") and not _has_substring(cleaned.get("resource_name")):
+            cleaned["resource_name"] = None
+        if not _has_time_evidence():
+            cleaned["start_time"] = None
+            cleaned["end_time"] = None
+    return cleaned
 
 
 def _looks_like_workspace_value(field: str, value: str) -> bool:

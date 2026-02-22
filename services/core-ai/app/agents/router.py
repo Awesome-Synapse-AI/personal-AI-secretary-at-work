@@ -15,7 +15,44 @@ LLM_SYSTEM_PROMPT = (
     "Do not include reasoning, code fences, or any other text. "
     "Domain must be one of: workspace, hr, ops, it, doc_qa, generic. "
     "Sensitivity must be one of: normal, hr_personal, salary, access. "
-    "If unsure, use generic and normal."
+    "If unsure, use generic and normal. "
+    "Examples:\n"
+    "HR:\n"
+    "Input: I need sick leave tomorrow -> {\"domain\":\"hr\",\"sensitivity\":\"hr_personal\"}\n"
+    "Input: Request annual leave 2026-03-10 to 2026-03-12 -> {\"domain\":\"hr\",\"sensitivity\":\"normal\"}\n"
+    "Input: How many vacation days do I have left? -> {\"domain\":\"hr\",\"sensitivity\":\"normal\"}\n"
+    "Input: Unpaid leave next week for personal reasons -> {\"domain\":\"hr\",\"sensitivity\":\"hr_personal\"}\n"
+    "Input: Update my leave request -> {\"domain\":\"hr\",\"sensitivity\":\"normal\"}\n"
+    "OPS:\n"
+    "Input: I want to send request for expense -> {\"domain\":\"ops\",\"sensitivity\":\"normal\"}\n"
+    "Input: Reimburse $45 taxi from yesterday -> {\"domain\":\"ops\",\"sensitivity\":\"normal\"}\n"
+    "Input: Book a flight from NYC to LAX -> {\"domain\":\"ops\",\"sensitivity\":\"normal\"}\n"
+    "Input: Submit a travel request for next month -> {\"domain\":\"ops\",\"sensitivity\":\"normal\"}\n"
+    "Input: Hotel expense for 2026-02-20 -> {\"domain\":\"ops\",\"sensitivity\":\"normal\"}\n"
+    "IT:\n"
+    "Input: VPN keeps dropping -> {\"domain\":\"it\",\"sensitivity\":\"access\"}\n"
+    "Input: I need access to repo analytics -> {\"domain\":\"it\",\"sensitivity\":\"access\"}\n"
+    "Input: Password reset required -> {\"domain\":\"it\",\"sensitivity\":\"access\"}\n"
+    "Input: File an IT ticket for laptop issue -> {\"domain\":\"it\",\"sensitivity\":\"access\"}\n"
+    "Input: Grant me admin access to Jira -> {\"domain\":\"it\",\"sensitivity\":\"access\"}\n"
+    "Workspace:\n"
+    "Input: Book a room for 2pm -> {\"domain\":\"workspace\",\"sensitivity\":\"normal\"}\n"
+    "Input: Reserve a hot desk tomorrow -> {\"domain\":\"workspace\",\"sensitivity\":\"normal\"}\n"
+    "Input: Book parking spot B2 -> {\"domain\":\"workspace\",\"sensitivity\":\"normal\"}\n"
+    "Input: Reserve a projector 1-2pm -> {\"domain\":\"workspace\",\"sensitivity\":\"normal\"}\n"
+    "Input: Meeting room unavailable -> {\"domain\":\"workspace\",\"sensitivity\":\"normal\"}\n"
+    "Doc_QA:\n"
+    "Input: Search the handbook for travel policy -> {\"domain\":\"doc_qa\",\"sensitivity\":\"normal\"}\n"
+    "Input: Summarize the onboarding PDF -> {\"domain\":\"doc_qa\",\"sensitivity\":\"normal\"}\n"
+    "Input: What is the per diem limit? -> {\"domain\":\"doc_qa\",\"sensitivity\":\"normal\"}\n"
+    "Input: Find my uploaded document -> {\"domain\":\"doc_qa\",\"sensitivity\":\"normal\"}\n"
+    "Input: Upload a policy document -> {\"domain\":\"doc_qa\",\"sensitivity\":\"normal\"}\n"
+    "Generic:\n"
+    "Input: Hello -> {\"domain\":\"generic\",\"sensitivity\":\"normal\"}\n"
+    "Input: What can you do? -> {\"domain\":\"generic\",\"sensitivity\":\"normal\"}\n"
+    "Input: Thanks -> {\"domain\":\"generic\",\"sensitivity\":\"normal\"}\n"
+    "Input: Tell me a joke -> {\"domain\":\"generic\",\"sensitivity\":\"normal\"}\n"
+    "Input: How are you? -> {\"domain\":\"generic\",\"sensitivity\":\"normal\"}\n"
 )
 
 
@@ -38,6 +75,22 @@ def _heuristic_route(message: str) -> tuple[str, str]:
     if any(word in lower for word in ["policy", "document", "pdf", "handbook", "guide", "search docs", "upload"]):
         return "doc_qa", "normal"
     return "generic", "normal"
+
+
+def _override_domain(message: str, domain: str) -> str:
+    """
+    Override LLM routing when high-confidence keywords appear.
+    """
+    lower = message.lower()
+    if any(word in lower for word in ["expense", "receipt", "reimburse", "reimbursement", "claim", "travel", "flight", "hotel"]):
+        return "ops"
+    if any(word in lower for word in ["leave", "sick", "vacation", "holiday", "pto"]):
+        return "hr"
+    if any(word in lower for word in ["access", "password", "login", "vpn", "ticket", "it"]):
+        return "it"
+    if any(word in lower for word in ["policy", "document", "pdf", "handbook", "guide", "search docs", "upload"]):
+        return "doc_qa"
+    return domain
 
 
 @traceable(name="router_llm_classify", run_type="chain")
@@ -68,6 +121,7 @@ async def router_node(state: ChatState) -> ChatState:
         llm_result = await _classify_with_llm(message)
         if llm_result:
             state["domain"], state["sensitivity"] = llm_result
+            state["domain"] = _override_domain(message, state["domain"])
             _add_event(
                 state,
                 "router_classified_llm",
