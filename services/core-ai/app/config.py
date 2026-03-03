@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 86400
     database_url: str = "postgresql://ai:ai_password@postgres:5432/ai_secretary"
+    mongo_url: str = "mongodb://mongodb:27017"
+    mongo_db_name: str = "ai_secretary"
+    mongo_chat_session_collection: str = "chat_sessions"
+    mongo_chat_message_collection: str = "chat_messages"
 
     auth_disabled: bool = True
     keycloak_realm_url: str = "http://localhost:8080/realms/ai-secretary"
@@ -45,16 +49,21 @@ class Settings(BaseSettings):
     tesseract_cmd: str | None = None  # set to tesseract binary path if not on PATH
 
     # Qdrant / embeddings
-    qdrant_host: str | None = None
+    # Default to the docker-compose service name so vector indexing works out of the box.
+    qdrant_host: str | None = "qdrant"
     qdrant_port: int = 6333
     qdrant_api_key: str | None = None
     qdrant_collection_user_docs: str = "user_docs"
     qdrant_collection_policy_hr: str = "policy_hr"
     qdrant_collection_policy_it: str = "policy_it"
     qdrant_collection_policy_travel_expense: str = "policy_travel_expense"
-    embedding_model_name: str = "BAAI/bge-m3"
+    # Default to a lightweight, reliable model to avoid long downloads.
+    embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_device: str = "cpu"  # set to "cuda" if GPU available
     embedding_normalize: bool = True
+    embedding_vector_size: int = 384  # dimension for MiniLM
+    hf_token: str | None = None  # set to your HF token to avoid rate limits
+    huggingface_hub_cache: str | None = "./hf-cache"
 
     upload_dir: str = "./data/uploads"
 

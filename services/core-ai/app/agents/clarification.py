@@ -41,6 +41,7 @@ QUESTION_MAP = {
     "subtype": "Is this an IT issue or a facilities issue?",
     "description": "Can you describe the issue in a sentence?",
     "location": "Which room or area is this in?",
+    "entity": "Which asset is affected (printer, laptop, software, network, etc.)?",
     "resource": "Which system or repo do you need access to?",
     "requested_role": "What level of access do you need (read, write, admin)?",
     "justification": "Briefly explain why you need this access.",
@@ -60,7 +61,7 @@ FIELD_SETS = {
     RequestType.EXPENSE: ["amount", "currency", "date", "category", "project_code"],
     RequestType.TRAVEL: ["origin", "destination", "departure_date", "return_date", "class"],
     RequestType.ACCESS: ["resource", "requested_role", "justification"],
-    RequestType.TICKET: ["subtype", "description", "location"],
+    RequestType.TICKET: ["subtype", "description", "location", "entity"],
     RequestType.WORKSPACE_BOOKING: [
         "resource_type",
         "resource_name",
@@ -77,7 +78,7 @@ FIELD_DESCRIPTIONS = {
     RequestType.EXPENSE: "amount (number), currency (ISO 4217), date (DD/MM/YYYY), category, project_code",
     RequestType.TRAVEL: "origin, destination, departure_date (DD/MM/YYYY), return_date (DD/MM/YYYY), class",
     RequestType.ACCESS: "resource, requested_role (read/write/admin), justification",
-    RequestType.TICKET: "subtype (it or facilities), description, location",
+    RequestType.TICKET: "subtype (it or facilities), description, location, entity (asset like printer/laptop/software/network)",
     RequestType.WORKSPACE_BOOKING: "resource_type (room/desk/equipment/parking), resource_name, start_time (include date if present), end_time (include date if present), location, description",
 }
 
@@ -260,14 +261,14 @@ def _extraction_guidance(request_type: RequestType) -> str:
         )
     if request_type == RequestType.TICKET:
         return (
-            "Rules: subtype is it or facilities; description should summarize the issue. "
+            "Rules: subtype is it or facilities; description should summarize the issue; entity is the affected asset. "
             "Examples:\n"
             'Input: "AC broken in Room 12"\n'
-            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"AC broken","location":"Room 12"}}\n'
+            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"AC broken","location":"Room 12","entity":"ac"}}\n'
             'Input: "VPN keeps dropping on my laptop"\n'
-            'Output: {"request_type":"ticket","fields":{"subtype":"it","description":"VPN keeps dropping","location":null}}\n'
+            'Output: {"request_type":"ticket","fields":{"subtype":"it","description":"VPN keeps dropping","location":null,"entity":"vpn"}}\n'
             'Input: "Projector not working in Meeting Room A"\n'
-            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"Projector not working","location":"Meeting Room A"}}'
+            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"Projector not working","location":"Meeting Room A","entity":"projector"}}'
         )
     if request_type == RequestType.WORKSPACE_BOOKING:
         return (
@@ -428,6 +429,8 @@ def _filter_fields_by_evidence(
             cleaned["description"] = None
         if cleaned.get("location") and not _has_substring(cleaned.get("location")):
             cleaned["location"] = None
+        if cleaned.get("entity") and not _has_substring(cleaned.get("entity")):
+            cleaned["entity"] = None
     elif req_enum == RequestType.WORKSPACE_BOOKING:
         if cleaned.get("resource_type") and not _has_resource_type(cleaned.get("resource_type")):
             cleaned["resource_type"] = None
@@ -478,9 +481,7 @@ def _missing_fields(pending: dict[str, Any]) -> list[str]:
     elif req_enum == RequestType.ACCESS:
         required = ["resource", "requested_role", "justification"]
     elif req_enum == RequestType.TICKET:
-        required = ["subtype", "description"]
-        if filled.get("subtype") == "facilities":
-            required.append("location")
+        required = ["subtype", "description", "location", "entity"]
     elif req_enum == RequestType.WORKSPACE_BOOKING:
         required = ["resource_type", "resource_name", "start_time", "end_time"]
     else:

@@ -315,7 +315,7 @@ async def test_ticket_pending_parses_subtype_description_and_location(monkeypatc
     captured = {}
 
     async def fake_extract_fields(*args, **kwargs):
-        return {"subtype": None, "description": None, "location": None}
+        return {"subtype": None, "description": None, "location": None, "entity": None}
 
     async def fake_call_tool(state, service, path, payload, action_type):
         captured["payload"] = payload
@@ -331,7 +331,7 @@ async def test_ticket_pending_parses_subtype_description_and_location(monkeypatc
             "domain": "it",
             "type": RequestType.TICKET,
             "filled": {},
-            "missing": ["subtype", "description", "location"],
+            "missing": ["subtype", "description", "location", "entity"],
             "step": "collecting_details",
         },
         actions=[],
@@ -344,6 +344,16 @@ async def test_ticket_pending_parses_subtype_description_and_location(monkeypatc
     assert captured["payload"]["type"] == "facilities"
     assert "ac is broken" in captured["payload"]["description"].lower()
     assert "room 12" in captured["payload"]["location"].lower()
+    assert captured["payload"]["category"] == "ac"
+
+
+def test_ticket_missing_fields_require_location_entity():
+    pending = build_pending_request(
+        "it",
+        RequestType.TICKET,
+        {"subtype": "it", "description": "printer not working"},
+    )
+    assert pending["missing"] == ["location", "entity"]
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,30 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     session_id: str
+    session_title: str | None = None
     message: str
     actions: list[dict[str, Any]] = Field(default_factory=list)
     pending_request: dict[str, Any] | None = None
     events: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ChatSessionMeta(BaseModel):
+    id: str
+    title: str | None = None
+    updated_at: int
+
+
+class ChatMessagePayload(BaseModel):
+    id: str
+    role: str
+    content: str
+    created_at: int
+    pending_request: dict[str, Any] | None = None
+    actions: list[dict[str, Any]] | None = None
+    events: list[dict[str, Any]] | None = None
+
+
+class ChatSessionMessagesResponse(BaseModel):
+    session_id: str
+    title: str | None = None
+    messages: list[ChatMessagePayload]

@@ -8,18 +8,41 @@ from app.api import router
 from app.config import settings
 from app.db import init_db
 from app.logging_config import configure_logging
+from app.mongo import create_mongo_client
 from app.memory.session_store import SessionStore
 from app.observability import RequestContextMiddleware, metrics_endpoint
 
 
+async def _ensure_indexes(mongo_db):
+    sessions = mongo_db[settings.mongo_chat_session_collection]
+    messages = mongo_db[settings.mongo_chat_message_collection]
+    await sessions.create_index([("tenant_id", 1), ("updated_at", -1)])
+    await messages.create_index([("session_id", 1), ("created_at", 1)])
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    mongo_client = None
+    mongo_db = None
+    try:
+        mongo_client = await create_mongo_client()
+        mongo_db = mongo_client[settings.mongo_db_name]
+        await _ensure_indexes(mongo_db)
+    except Exception as exc:  # pragma: no cover
+        print(f"lifespan: Mongo unavailable, continuing without it: {exc}", flush=True)
+        mongo_client = None
+        mongo_db = None
+
     session_store = SessionStore(settings.redis_url, settings.session_ttl_seconds)
     await session_store.connect()
     app.state.session_store = session_store
+    app.state.mongo_client = mongo_client
+    app.state.mongo_db = mongo_db
     init_db()
     yield
     await session_store.close()
+    if mongo_client:
+        mongo_client.close()
     await tool_runner.close()
 
 

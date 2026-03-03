@@ -57,3 +57,24 @@ def test_ticket_type_validation(client):
         json={"type": "invalid", "description": "broken mouse"},
     )
     assert resp.status_code == 400
+
+
+def test_create_ticket_accepts_string_enum_value(client):
+    resp = client.post(
+        f"{settings.api_prefix}/domain/tickets",
+        json={"type": "it", "description": "Printer not working", "location": "HQ-1F"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()["ticket"]
+    assert body["type"] == TicketType.IT.value
+    assert body["description"] == "Printer not working"
+
+
+def test_ticket_category_populated_from_entity(client):
+    resp = client.post(
+        f"{settings.api_prefix}/domain/tickets",
+        json={"type": "facilities", "description": "Projector broken", "location": "HQ-2F", "category": "projector"},
+    )
+    assert resp.status_code == 200
+    ticket = resp.json()["ticket"]
+    assert ticket["category"] == "projector"

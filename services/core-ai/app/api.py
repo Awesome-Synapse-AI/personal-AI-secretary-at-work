@@ -1,11 +1,12 @@
 import os
+import asyncio
 import uuid
 import io
 from pathlib import Path
 from datetime import date, datetime
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, File, Form, Header
 from sqlmodel import Session, select
 from sqlalchemy import func
 from dateutil import parser as dateparser
@@ -14,6 +15,11 @@ import numpy as np
 import boto3
 import pytesseract
 from PIL import Image
+from llama_index.core import Document as LlamaDocument, VectorStoreIndex
+from llama_index.core.schema import TextNode
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.auth import get_current_user, get_user_from_token, require_roles
 from app.audit import record_audit_log
@@ -55,7 +61,14 @@ from app.models import (
     DocumentChunk,
     DocumentSearchInput,
 )
-from app.schemas.chat import ChatRequest, ChatResponse, UserContext
+from app.schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+    ChatSessionMeta,
+    ChatSessionMessagesResponse,
+    ChatMessagePayload,
+    UserContext,
+)
 from app.utils import iter_tokens, utcnow
 
 router = APIRouter()
@@ -65,6 +78,45 @@ router = APIRouter()
 
 def _current_user_id(user: Optional[UserContext]) -> str:
     return user.sub if user and user.sub else "demo-user"
+
+
+def _tenant_from_header(tenant_id_header: str | None) -> str:
+    return tenant_id_header or settings.default_tenant_id
+
+
+def _serialize_session_meta(doc: dict) -> ChatSessionMeta:
+    updated = doc.get("updated_at")
+    ts = int(updated.timestamp() * 1000) if updated else 0
+    return ChatSessionMeta(id=str(doc.get("_id")), title=doc.get("title"), updated_at=ts)
+
+
+def _serialize_chat_message(row: dict) -> ChatMessagePayload:
+    created = row.get("created_at")
+    return ChatMessagePayload(
+        id=str(row.get("_id")),
+        role=row.get("role", ""),
+        content=row.get("content", ""),
+        created_at=int(created.timestamp() * 1000) if created else 0,
+        pending_request=row.get("pending_request"),
+        actions=row.get("actions"),
+        events=row.get("events"),
+    )
+
+
+def _derive_session_title(messages: list[dict]) -> str:
+    def _trim(text: str) -> str:
+        if not text:
+            return "New chat"
+        first_line = text.strip().splitlines()[0]
+        snippet = first_line[:60].rstrip()
+        return f"{snippet}..." if len(first_line) > 60 else (snippet or "New chat")
+
+    for msg in messages:
+        if msg.role == "user" and msg.content:
+            return _trim(msg.content)
+    if messages:
+        return _trim(messages[0].content)
+    return "New chat"
 
 
 def _get_entitlement(session: Session, user_id: str, year: int, leave_type: str, month: int | None = None) -> LeaveEntitlement | None:
@@ -299,13 +351,45 @@ _embedding_model_cache = None
 def _embedding_model():
     from sentence_transformers import SentenceTransformer  # lazy import
 
+    class _FallbackEmbedder:
+        def __init__(self, dim: int, normalize: bool = True):
+            self.dim = dim
+            self.normalize = normalize
+
+        def encode(self, texts, normalize_embeddings=True):
+            normalize = self.normalize and normalize_embeddings
+            vecs = []
+            for text in texts:
+                seed = abs(hash(text)) % (2**32)
+                rng = np.random.default_rng(seed)
+                v = rng.normal(size=self.dim)
+                if normalize:
+                    norm = np.linalg.norm(v)
+                    if norm > 0:
+                        v = v / norm
+                vecs.append(v)
+            return np.stack(vecs)
+
     global _embedding_model_cache
-    if _embedding_model_cache is None:
+    if _embedding_model_cache is not None:
+        return _embedding_model_cache
+
+    try:
+        cache_kwargs = {}
+        if settings.huggingface_hub_cache:
+            os.environ["HUGGINGFACE_HUB_CACHE"] = settings.huggingface_hub_cache
+            cache_kwargs["cache_folder"] = settings.huggingface_hub_cache
+
         _embedding_model_cache = SentenceTransformer(
             settings.embedding_model_name,
             trust_remote_code=True,
             device=settings.embedding_device,
+            use_auth_token=settings.hf_token,
+            **cache_kwargs,
         )
+    except Exception as exc:  # pragma: no cover - best-effort fallback
+        print(f"_embedding_model: failed to load {settings.embedding_model_name}, using hashed fallback: {exc}", flush=True)
+        _embedding_model_cache = _FallbackEmbedder(settings.embedding_vector_size, settings.embedding_normalize)
     return _embedding_model_cache
 
 
@@ -315,14 +399,13 @@ async def _embed_texts(texts: List[str]) -> list[list[float]]:
     # run synchronous encoding in thread to avoid blocking event loop
     loop = asyncio.get_running_loop()
     model = _embedding_model()
-    vectors = await loop.run_in_executor(
+    return await loop.run_in_executor(
         None,
         lambda: model.encode(
             texts,
             normalize_embeddings=settings.embedding_normalize,
         ).tolist(),
     )
-    return vectors
 
 
 def _serialize_vec(vec: list[float]) -> bytes:
@@ -331,6 +414,29 @@ def _serialize_vec(vec: list[float]) -> bytes:
 
 def _deserialize_vec(blob: bytes) -> list[float]:
     return np.frombuffer(blob, dtype=np.float32).tolist()
+
+
+def _hf_embed_model():
+    cache = settings.huggingface_hub_cache
+    if cache:
+        os.environ["HUGGINGFACE_HUB_CACHE"] = cache
+        os.environ["TRANSFORMERS_CACHE"] = cache
+        os.environ["HF_HOME"] = cache
+    return HuggingFaceEmbedding(
+        model_name=settings.embedding_model_name,
+        cache_folder=cache,
+        device=settings.embedding_device,
+    )
+
+
+def _qdrant_store(collection: str | None, vector_size: int | None = None):
+    client = _qdrant_client()
+    if not client or not collection:
+        return None
+    kwargs = {}
+    if vector_size:
+        kwargs["vector_size"] = vector_size
+    return QdrantVectorStore(client=client, collection_name=collection, prefer_grpc=False, **kwargs)
 
 
 def _qdrant_client():
@@ -343,14 +449,32 @@ def _qdrant_client():
         host=host,
         port=int(settings.qdrant_port),
         api_key=settings.qdrant_api_key,
+        timeout=5,
+        check_compatibility=False,
     )
 
 
 def _ensure_collection(client, size: int, collection: str):
     from qdrant_client.http import models as qmodels
 
-    collections = client.get_collections().collections
-    if not any(c.name == collection for c in collections):
+    if size <= 0:
+        size = settings.embedding_vector_size
+
+    collections = {c.name: c for c in client.get_collections().collections}
+    existing = collections.get(collection)
+    if existing:
+        try:
+            info = client.get_collection(collection)
+            existing_size = info.vectors_count if hasattr(info, "vectors_count") else None
+            if hasattr(info, "config") and hasattr(info.config, "params") and hasattr(info.config.params, "size"):
+                existing_size = info.config.params.size
+            if existing_size and existing_size != size:
+                client.delete_collection(collection_name=collection)
+                existing = None
+        except Exception:
+            pass
+
+    if not existing:
         client.create_collection(
             collection_name=collection,
             vectors_config=qmodels.VectorParams(size=size, distance=qmodels.Distance.COSINE),
@@ -386,7 +510,7 @@ def _choose_collection(scope: str | None, source: str | None) -> str:
     return settings.qdrant_collection_user_docs
 
 
-def _chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> list[str]:
+def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> list[str]:
     words = text.split()
     chunks = []
     i = 0
@@ -1014,11 +1138,13 @@ async def reject_travel(
 async def create_ticket(
     ticket: TicketInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
-    if ticket.type not in TicketType:
+    try:
+        ticket_type = TicketType(ticket.type)
+    except ValueError:
         raise HTTPException(400, f"type must be one of: {', '.join([t.value for t in TicketType])}")
     data = TicketModel(
         user_id=_current_user_id(user),
-        type=TicketType(ticket.type),
+        type=ticket_type,
         category=ticket.category,
         description=ticket.description,
         location=ticket.location,
@@ -1063,7 +1189,9 @@ async def update_ticket(
         raise HTTPException(404, "ticket not found")
     updates = payload.model_dump(exclude_none=True)
     if "status" in updates:
-        if updates["status"] not in TicketStatus:
+        try:
+            updates["status"] = TicketStatus(updates["status"])
+        except ValueError:
             raise HTTPException(400, f"status must be one of: {', '.join([s.value for s in TicketStatus])}")
     for k, v in updates.items():
         setattr(ticket, k, v)
@@ -1081,14 +1209,16 @@ async def update_ticket(
 async def create_access_request(
     payload: AccessRequestInput, session: Session = Depends(get_session), user: UserContext = Depends(get_current_user)
 ):
-    if payload.requested_role not in RequestedRole:
+    try:
+        requested_role = RequestedRole(payload.requested_role)
+    except ValueError:
         raise HTTPException(400, f"requested_role must be one of: {', '.join([r.value for r in RequestedRole])}")
     user_id = _current_user_id(user)
     dup = session.exec(
         select(AccessRequestModel).where(
             AccessRequestModel.user_id == user_id,
             AccessRequestModel.resource == payload.resource,
-            AccessRequestModel.requested_role == RequestedRole(payload.requested_role),
+            AccessRequestModel.requested_role == requested_role,
             AccessRequestModel.status.in_([AccessStatus.PENDING, AccessStatus.APPROVED]),
         )
     ).first()
@@ -1098,7 +1228,7 @@ async def create_access_request(
     data = AccessRequestModel(
         user_id=user_id,
         resource=payload.resource,
-        requested_role=RequestedRole(payload.requested_role),
+        requested_role=requested_role,
         justification=payload.justification,
         status=AccessStatus.PENDING,
     )
@@ -1137,9 +1267,11 @@ async def list_access_requests(
     require_roles(user, {"it_approver", "system_admin", "admin_approver"}, "list_access_requests")
     statement = select(AccessRequestModel)
     if status:
-        if status not in AccessStatus:
+        try:
+            status_enum = AccessStatus(status)
+        except ValueError:
             raise HTTPException(400, f"status must be one of: {', '.join([s.value for s in AccessStatus])}")
-        statement = statement.where(AccessRequestModel.status == status)
+        statement = statement.where(AccessRequestModel.status == status_enum)
     return {"access_requests": session.exec(statement).all()}
 
 
@@ -1258,8 +1390,41 @@ async def upload_document(
     if content_type and "text" in content_type:
         text_content = file.decode(errors="ignore")
     else:
-        ocr_text = _ocr_bytes(file, content_type)
-        text_content = ocr_text or text_content
+        # Try PDF text extraction before falling back to OCR.
+        if (content_type and "pdf" in content_type.lower()) or filename.lower().endswith(".pdf"):
+            try:
+                from PyPDF2 import PdfReader  # type: ignore
+
+                reader = PdfReader(io.BytesIO(file))
+                extracted = [page.extract_text() or "" for page in reader.pages]
+                text_content = "\n".join(extracted).strip()
+            except Exception as exc:  # pragma: no cover - best-effort
+                print(f"upload_document: PDF text extraction failed: {exc}", flush=True)
+                text_content = ""
+            # If PDF text is empty, try PyMuPDF text and image-based OCR.
+            if not text_content:
+                try:
+                    import fitz  # PyMuPDF
+
+                    doc_pdf = fitz.open(stream=file, filetype="pdf")
+                    extracted = [page.get_text("text") or "" for page in doc_pdf]
+                    text_content = "\n".join(extracted).strip()
+                    if not text_content:
+                        ocr_parts: list[str] = []
+                        for page in doc_pdf:
+                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                            ocr_parts.append(pytesseract.image_to_string(img))
+                        text_content = "\n".join(ocr_parts).strip()
+                except Exception as exc:  # pragma: no cover
+                    print(f"upload_document: PyMuPDF fallback failed: {exc}", flush=True)
+        if not text_content:
+            ocr_text = _ocr_bytes(file, content_type)
+            text_content = ocr_text or text_content
+
+    # If still empty (e.g., scanned PDF without OCR), fall back to filename to ensure at least one chunk.
+    if not text_content:
+        text_content = filename
 
     doc = Document(
         owner=owner,
@@ -1274,20 +1439,43 @@ async def upload_document(
     session.refresh(doc)
 
     chunks = _chunk_text(text_content) if text_content else []
-    vectors = await _embed_texts(chunks) if chunks else []
+    if not chunks:
+        chunks = [text_content]
 
-    q_client = _qdrant_client()
+    try:
+        vectors = await _embed_texts(chunks)
+    except Exception as exc:  # pragma: no cover - embedding failure fallback
+        print(f"upload_document: embedding failed, using zero vectors: {exc}", flush=True)
+        vectors = [[0.0] * settings.embedding_vector_size for _ in chunks]
+
     collection = _choose_collection(scope, source)
-    if q_client and vectors:
-        _ensure_collection(q_client, len(vectors[0]), collection)
-        payloads = [{"document_id": doc.id, "chunk_index": idx, "owner": owner, "scope": scope} for idx, _ in enumerate(vectors)]
-        from qdrant_client.http import models as qmodels
-
-        points = [
-            qmodels.PointStruct(id=None, vector=vectors[i], payload=payloads[i])
-            for i in range(len(vectors))
+    vector_size = len(vectors[0]) if vectors else settings.embedding_vector_size
+    store = _qdrant_store(collection, vector_size=vector_size)
+    if store and vectors:
+        try:
+            _ensure_collection(store.client, vector_size, collection)
+        except Exception as exc:  # pragma: no cover
+            print(f"upload_document: ensure_collection failed: {exc}", flush=True)
+        nodes = [
+            TextNode(
+                id_=str(uuid.uuid4()),
+                text=chunk,
+                metadata={
+                    "document_id": doc.id,
+                    "chunk_index": idx,
+                    "owner": owner,
+                    "scope": scope,
+                },
+                embedding=vectors[idx],
+            )
+            for idx, chunk in enumerate(chunks)
         ]
-        q_client.upsert(collection_name=collection, wait=True, points=points)
+        try:
+            store.add(nodes)
+        except Exception as exc:  # pragma: no cover
+            print(f"upload_document: llamaindex store.add failed: {exc}", flush=True)
+    elif store:
+        print(f"upload_document: no vectors produced for doc {doc.id}; collection ensured '{collection}'", flush=True)
 
     for idx, chunk in enumerate(chunks):
         session.add(
@@ -1313,18 +1501,24 @@ async def search_documents(payload: DocumentSearchInput, session: Session = Depe
     client = _qdrant_client()
     collection = payload.collection or _choose_collection(payload.scope, None)
     if client:
-        _ensure_collection(client, len(query_vec), collection)
-        hits = client.search(
-            collection_name=collection,
-            query_vector=query_vec,
-            limit=payload.top_k,
-        )
-        doc_ids = [hit.payload.get("document_id") for hit in hits]
-        if doc_ids:
-            rows = session.exec(select(Document).where(Document.id.in_(doc_ids))).all()
-            id_map = {d.id: d for d in rows}
-            for hit in hits:
-                did = hit.payload.get("document_id")
+        store = _qdrant_store(collection)
+        if not store:
+            return {"matches": results}
+        embed_model = _hf_embed_model()
+        index = VectorStoreIndex.from_vector_store(vector_store=store, embed_model=embed_model)
+        retriever = index.as_retriever(similarity_top_k=payload.top_k)
+        try:
+            source_nodes = retriever.retrieve(payload.query)
+        except Exception as exc:  # pragma: no cover
+            raise HTTPException(502, f"Qdrant query failed: {exc}")
+
+        if source_nodes:
+            doc_ids = { (sn.metadata or {}).get("document_id") for sn in source_nodes if sn.metadata }
+            doc_rows = session.exec(select(Document).where(Document.id.in_(doc_ids))).all() if doc_ids else []
+            id_map = {d.id: d for d in doc_rows}
+            for sn in source_nodes:
+                meta = sn.metadata or {}
+                did = meta.get("document_id")
                 doc = id_map.get(did)
                 if not doc:
                     continue
@@ -1336,8 +1530,8 @@ async def search_documents(payload: DocumentSearchInput, session: Session = Depe
                     {
                         "document_id": doc.id,
                         "title": doc.title,
-                        "score": hit.score,
-                        "chunk_index": hit.payload.get("chunk_index"),
+                        "score": sn.score if hasattr(sn, "score") else None,
+                        "chunk_index": meta.get("chunk_index"),
                         "path": doc.path,
                     }
                 )
@@ -1376,6 +1570,69 @@ async def search_documents(payload: DocumentSearchInput, session: Session = Depe
 # ---------- Chat / Health ----------
 
 
+@router.get("/chat/sessions")
+async def list_chat_sessions(
+    request: Request,
+    tenant_id: str | None = Header(default=None, convert_underscores=False, alias="X-Tenant-Id"),
+) -> dict[str, list[ChatSessionMeta]]:
+    tenant = _tenant_from_header(tenant_id)
+    mongo_db: AsyncIOMotorDatabase = request.app.state.mongo_db
+    cursor = mongo_db[settings.mongo_chat_session_collection].find({"tenant_id": tenant}).sort("updated_at", -1)
+    rows = [doc async for doc in cursor]
+    return {"sessions": [_serialize_session_meta(r) for r in rows]}
+
+
+@router.get("/chat/sessions/{session_id}/messages", response_model=ChatSessionMessagesResponse)
+async def get_chat_session_messages(
+    session_id: str,
+    tenant_id: str | None = Header(default=None, convert_underscores=False, alias="X-Tenant-Id"),
+    request: Request = None,
+) -> ChatSessionMessagesResponse:
+    tenant = _tenant_from_header(tenant_id)
+    mongo_db: AsyncIOMotorDatabase = request.app.state.mongo_db
+    session_doc = await mongo_db[settings.mongo_chat_session_collection].find_one({"_id": session_id, "tenant_id": tenant})
+    if not session_doc:
+        raise HTTPException(404, "Session not found")
+    cursor = (
+        mongo_db[settings.mongo_chat_message_collection]
+        .find({"session_id": session_id, "tenant_id": tenant})
+        .sort("created_at", 1)
+    )
+    messages = [async_doc async for async_doc in cursor]
+    return ChatSessionMessagesResponse(
+        session_id=session_doc["_id"],
+        title=session_doc.get("title"),
+        messages=[_serialize_chat_message(m) for m in messages],
+    )
+
+
+@router.post("/chat/sessions/{session_id}/title")
+async def generate_chat_title(
+    session_id: str,
+    tenant_id: str | None = Header(default=None, convert_underscores=False, alias="X-Tenant-Id"),
+    request: Request = None,
+) -> dict[str, str]:
+    tenant = _tenant_from_header(tenant_id)
+    mongo_db: AsyncIOMotorDatabase = request.app.state.mongo_db
+    session_doc = await mongo_db[settings.mongo_chat_session_collection].find_one({"_id": session_id, "tenant_id": tenant})
+    if not session_doc:
+        raise HTTPException(404, "Session not found")
+
+    cursor = (
+        mongo_db[settings.mongo_chat_message_collection]
+        .find({"session_id": session_id, "tenant_id": tenant})
+        .sort("created_at", 1)
+    )
+    messages = [async_doc async for async_doc in cursor]
+
+    title = _derive_session_title(messages)
+    await mongo_db[settings.mongo_chat_session_collection].update_one(
+        {"_id": session_id, "tenant_id": tenant},
+        {"$set": {"title": title, "updated_at": utcnow()}},
+    )
+    return {"id": session_id, "title": title or "New chat"}
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -1388,12 +1645,14 @@ async def chat(
     user: UserContext = Depends(get_current_user),
 ) -> ChatResponse:
     session_store = request.app.state.session_store
+    mongo_db: AsyncIOMotorDatabase = request.app.state.mongo_db
     result = await handle_chat(
         session_store,
         payload.message,
         payload.session_id,
         user,
         payload.tenant_id,
+        mongo_db=mongo_db,
     )
     return ChatResponse(**result)
 
@@ -1404,6 +1663,7 @@ async def chat_stream(websocket: WebSocket, session_id: str | None = None) -> No
     token = _extract_bearer_token(websocket)
     user = await get_user_from_token(token)
     session_store = websocket.app.state.session_store
+    mongo_db: AsyncIOMotorDatabase = websocket.app.state.mongo_db
 
     try:
         while True:
@@ -1413,7 +1673,15 @@ async def chat_stream(websocket: WebSocket, session_id: str | None = None) -> No
             message = incoming.get("message", "")
             tenant_id = incoming.get("tenant_id")
 
-            result = await handle_chat(session_store, message, session_id, user, tenant_id)
+            result = await handle_chat(
+                session_store,
+                message,
+                session_id,
+                user,
+                tenant_id,
+                mongo_db=mongo_db,
+            )
+
             session_id = result.get("session_id", session_id)
 
             for event in result.get("events", []):
@@ -1425,6 +1693,8 @@ async def chat_stream(websocket: WebSocket, session_id: str | None = None) -> No
             await websocket.send_json(
                 {
                     "type": "final_response",
+                    "session_id": session_id,
+                    "session_title": result.get("session_title"),
                     "message": result.get("message", ""),
                     "actions": result.get("actions", []),
                     "pending_request": result.get("pending_request"),

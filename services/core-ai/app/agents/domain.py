@@ -188,6 +188,9 @@ async def _handle_it(
         updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
+            if pending.get("type") == RequestType.TICKET:
+                prompt = await _ticket_prompt(pending, state)
+                return prompt, pending, []
             return next_question(pending), pending, []
         if pending.get("type") == RequestType.ACCESS:
             action = await _submit_access_request(pending, state)
@@ -205,6 +208,9 @@ async def _handle_it(
     if request_type in {RequestType.ACCESS, RequestType.TICKET}:
         pending = build_pending_request("it", request_type, fields)
         if pending["missing"]:
+            if request_type == RequestType.TICKET:
+                prompt = await _ticket_prompt(pending, state)
+                return prompt, pending, []
             return next_question(pending), pending, []
         if request_type == RequestType.ACCESS:
             action = await _submit_access_request(pending, state)
@@ -302,6 +308,34 @@ async def _workspace_prompt(pending: dict[str, Any], state: ChatState) -> str:
     return next_question(pending)
 
 
+async def _ticket_prompt(pending: dict[str, Any], state: ChatState) -> str:
+    filled = pending.get("filled", {})
+    missing = pending.get("missing", [])
+    subtype = (pending.get("subtype") or filled.get("subtype") or "").lower()
+    if "location" in missing:
+        room_names, area_names, equipment_names = await _facility_location_suggestions(state)
+        if room_names and area_names and equipment_names:
+            return (
+                "Which room or area is this in? "
+                f"Available rooms: {room_names}. Areas/locations: {area_names}. Equipment: {equipment_names}."
+            )
+        if room_names and area_names:
+            return f"Which room or area is this in? Available rooms: {room_names}. Areas/locations: {area_names}."
+        if room_names and equipment_names:
+            return f"Which room is this in? Available rooms: {room_names}. Equipment: {equipment_names}."
+        if area_names and equipment_names:
+            return f"Which area or location is this in? Areas/locations: {area_names}. Equipment: {equipment_names}."
+        if room_names:
+            return f"Which room is this in? Available rooms: {room_names}."
+        if area_names:
+            return f"Which area or location is this in? Areas/locations: {area_names}."
+        if equipment_names:
+            return f"Which equipment is this related to? Equipment: {equipment_names}."
+    if "entity" in missing:
+        return "Which asset is affected (printer, laptop, software, network, projector, etc.)?"
+    return next_question(pending)
+
+
 async def _list_resources(resource_type: str) -> list[dict]:
     key_map = {
         "room": "rooms",
@@ -324,6 +358,49 @@ async def _list_resources(resource_type: str) -> list[dict]:
 def _resource_suggestions(label: str, items: list[dict]) -> str:
     names = ", ".join([str(i.get("name") or i.get("id")) for i in items]) if items else ""
     return names or f"{label} are not available yet"
+
+
+def _unique_strings(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(text)
+    return ordered
+
+
+def _format_suggestions(values: list[Any], limit: int = 12) -> str | None:
+    names = _unique_strings(values)
+    if not names:
+        return None
+    if len(names) > limit:
+        extra = len(names) - limit
+        names = names[:limit] + [f"and {extra} more"]
+    return ", ".join(names)
+
+
+async def _facility_location_suggestions(state: ChatState) -> tuple[str | None, str | None, str | None]:
+    rooms = await _list_resources("room")
+    desks = await _list_resources("desk")
+    parking = await _list_resources("parking")
+    equipment = await _list_resources("equipment")
+
+    room_names = _format_suggestions([r.get("name") for r in rooms])
+    area_names = _format_suggestions(
+        [r.get("location") for r in rooms]
+        + [d.get("location") for d in desks]
+        + [p.get("location") for p in parking]
+    )
+    equipment_names = _format_suggestions([e.get("name") for e in equipment])
+    return room_names, area_names, equipment_names
 
 
 async def _handle_doc_qa(
@@ -393,6 +470,7 @@ async def _submit_ticket_request(pending: dict[str, Any], state: ChatState) -> d
         "type": pending.get("subtype", pending["filled"].get("subtype", "it")),
         "description": pending["filled"].get("description"),
         "location": pending["filled"].get("location"),
+        "category": pending["filled"].get("entity"),
     }
     return await _call_tool(state, "ticket", "/tickets", payload, "ticket_request")
 
@@ -723,7 +801,7 @@ def _coerce_answer_for_field(field: str, message: str) -> Any:
         if not _looks_like_date_expression(text):
             return None
         return _parse_iso_date_strict(text)
-    if field in {"start_time", "end_time", "description", "location", "resource", "resource_name"}:
+    if field in {"start_time", "end_time", "description", "location", "resource", "resource_name", "entity"}:
         return text
     if field in {"origin", "destination", "leave_type", "category", "project_code", "reason", "justification"}:
         if field == "category":
@@ -900,9 +978,20 @@ def _infer_ticket_fields(text: str) -> dict[str, Any]:
     fields: dict[str, Any] = {"description": text.strip()}
     low = text.lower()
     fields["subtype"] = "facilities" if any(w in low for w in ("ac", "aircon", "light", "room", "facility")) else "it"
+
+    # Location
     m = re.search(r"\b(?:in|at)\s+([A-Za-z0-9#\-\s]{2,40})", text, flags=re.IGNORECASE)
     if m:
         fields["location"] = m.group(1).strip().rstrip(".")
+
+    # Entity (asset)
+    asset_match = re.search(
+        r"\b(printer|laptop|desktop|computer|pc|mac|ac|aircon|software|vpn|wifi|network|projector|monitor|email|phone)\b",
+        low,
+    )
+    if asset_match:
+        fields["entity"] = asset_match.group(1)
+
     return fields
 
 
