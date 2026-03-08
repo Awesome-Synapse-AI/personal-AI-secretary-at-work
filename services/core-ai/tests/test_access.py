@@ -58,6 +58,20 @@ def test_access_request_missing_role_validation(client):
     assert resp.status_code == 400
 
 
+def test_create_access_request_accepts_needed_by_date(client):
+    resp = client.post(
+        f"{settings.api_prefix}/domain/access-requests",
+        json={
+            "resource": "repo-sre",
+            "requested_role": "viewer",
+            "justification": "on-call support",
+            "needed_by_date": "2026-08-20",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["access_request"]["needed_by_date"] == "2026-08-20"
+
+
 def test_access_audit_logs(client, session):
     created = client.post(
         f"{settings.api_prefix}/domain/access-requests",

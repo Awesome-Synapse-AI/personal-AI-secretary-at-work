@@ -1153,12 +1153,19 @@ async def create_ticket(
         ticket_type = TicketType(ticket.type)
     except ValueError:
         raise HTTPException(400, f"type must be one of: {', '.join([t.value for t in TicketType])}")
+    incident_date = None
+    if ticket.incident_date:
+        try:
+            incident_date = _as_date(ticket.incident_date)
+        except HTTPException as exc:
+            raise HTTPException(400, "incident_date must be DD/MM/YYYY") from exc
     data = TicketModel(
         user_id=_current_user_id(user),
         type=ticket_type,
         category=ticket.category,
         description=ticket.description,
         location=ticket.location,
+        incident_date=incident_date,
         priority=ticket.priority,
         status=TicketStatus.OPEN,
     )
@@ -1235,12 +1242,19 @@ async def create_access_request(
     ).first()
     if dup:
         raise HTTPException(409, "An access request for this resource and role already exists or was approved")
+    needed_by_date = None
+    if payload.needed_by_date:
+        try:
+            needed_by_date = _as_date(payload.needed_by_date)
+        except HTTPException as exc:
+            raise HTTPException(400, "needed_by_date must be DD/MM/YYYY") from exc
 
     data = AccessRequestModel(
         user_id=user_id,
         resource=payload.resource,
         requested_role=requested_role,
         justification=payload.justification,
+        needed_by_date=needed_by_date,
         status=AccessStatus.PENDING,
     )
     session.add(data)

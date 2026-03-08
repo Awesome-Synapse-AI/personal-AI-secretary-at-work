@@ -4,6 +4,7 @@ WORKDIR /app
 
 # Requirements are already baked into the base image.
 COPY app /app/app
+COPY db /app/db
 
 ENV PYTHONUNBUFFERED=1
 

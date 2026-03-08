@@ -2,6 +2,8 @@
 -- Postgres 16+ (uses GENERATED AS IDENTITY)
 
 BEGIN;
+CREATE SCHEMA IF NOT EXISTS public;
+SET search_path TO public;
 
 -- ---------- Enums ----------
 DO $$ BEGIN
@@ -88,6 +90,7 @@ CREATE TABLE IF NOT EXISTS ticket (
   category        TEXT,
   description     TEXT NOT NULL,
   location        TEXT,
+  incident_date   DATE,
   priority        TEXT,
   status          ticket_status_enum NOT NULL DEFAULT 'open',
   assignee        TEXT,
@@ -101,6 +104,7 @@ CREATE TABLE IF NOT EXISTS accessrequest (
   resource        TEXT NOT NULL,
   requested_role  requested_role_enum NOT NULL,
   justification   TEXT NOT NULL,
+  needed_by_date  DATE,
   status          access_status_enum NOT NULL DEFAULT 'pending',
   approver_id     TEXT,
   reject_reason   TEXT,
@@ -108,6 +112,12 @@ CREATE TABLE IF NOT EXISTS accessrequest (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_accessrequest_status ON accessrequest (status);
+
+ALTER TABLE IF EXISTS ticket
+  ADD COLUMN IF NOT EXISTS incident_date DATE;
+
+ALTER TABLE IF EXISTS accessrequest
+  ADD COLUMN IF NOT EXISTS needed_by_date DATE;
 
 CREATE TABLE IF NOT EXISTS auditlog (
   id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -220,28 +230,39 @@ INSERT INTO app_user (id, email, full_name, role) VALUES
   ('emp-003',   'kim.lee@example.com',   'Kim Lee',   'employee')
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO leaveentitlement (user_id, year, leave_type, days_available, month) VALUES
-  -- Default local/dev user (auth disabled)
-  ('local-user', 2025, 'sick',   30, NULL),
-  ('local-user', 2025, 'annual', 8,  NULL),
-  ('local-user', 2026, 'sick',   30, NULL),
-  ('local-user', 2026, 'annual', 8,  NULL),
-  ('emp-001', 2026, 'annual', 8, NULL),
-  ('emp-001', 2026, 'sick',   30, NULL),
-  ('emp-001', 2026, 'business', 7, NULL),
-  ('emp-001', 2026, 'wedding',   3, NULL),
-  ('emp-001', 2026, 'bravement',   5, NULL),
-  ('emp-002', 2026, 'annual', 8, NULL),
-  ('emp-002', 2026, 'sick',   30, NULL),
-  ('emp-002', 2026, 'business', 7, NULL),
-  ('emp-002', 2026, 'wedding',   3, NULL),
-  ('emp-002', 2026, 'bravement',   5, NULL),
-  ('emp-003', 2026, 'annual', 8, NULL),
-  ('emp-003', 2026, 'sick',   30, NULL),
-  ('emp-003', 2026, 'business', 7, NULL),
-  ('emp-003', 2026, 'wedding',   3, NULL),
-  ('emp-003', 2026, 'bravement',   5, NULL),
-ON CONFLICT DO NOTHING;
+INSERT INTO leaveentitlement (user_id, year, leave_type, days_available, month)
+SELECT v.user_id, v.year, v.leave_type, v.days_available, v.month
+FROM (
+  VALUES
+    -- Default local/dev user (auth disabled)
+    ('local-user', 2025, 'sick',      30::numeric, NULL::integer),
+    ('local-user', 2025, 'annual',     8::numeric, NULL::integer),
+    ('local-user', 2026, 'sick',      30::numeric, NULL::integer),
+    ('local-user', 2026, 'annual',     8::numeric, NULL::integer),
+    ('emp-001',   2026, 'annual',      8::numeric, NULL::integer),
+    ('emp-001',   2026, 'sick',       30::numeric, NULL::integer),
+    ('emp-001',   2026, 'business',    7::numeric, NULL::integer),
+    ('emp-001',   2026, 'wedding',     3::numeric, NULL::integer),
+    ('emp-001',   2026, 'bereavement', 5::numeric, NULL::integer),
+    ('emp-002',   2026, 'annual',      8::numeric, NULL::integer),
+    ('emp-002',   2026, 'sick',       30::numeric, NULL::integer),
+    ('emp-002',   2026, 'business',    7::numeric, NULL::integer),
+    ('emp-002',   2026, 'wedding',     3::numeric, NULL::integer),
+    ('emp-002',   2026, 'bereavement', 5::numeric, NULL::integer),
+    ('emp-003',   2026, 'annual',      8::numeric, NULL::integer),
+    ('emp-003',   2026, 'sick',       30::numeric, NULL::integer),
+    ('emp-003',   2026, 'business',    7::numeric, NULL::integer),
+    ('emp-003',   2026, 'wedding',     3::numeric, NULL::integer),
+    ('emp-003',   2026, 'bereavement', 5::numeric, NULL::integer)
+) AS v(user_id, year, leave_type, days_available, month)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM leaveentitlement le
+  WHERE le.user_id = v.user_id
+    AND le.year = v.year
+    AND le.leave_type = v.leave_type
+    AND le.month IS NOT DISTINCT FROM v.month
+);
 
 INSERT INTO room (name, capacity, location) VALUES
   ('Orion', 10, 'HQ-1F'),

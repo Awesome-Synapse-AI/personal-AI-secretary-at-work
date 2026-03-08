@@ -1,7 +1,7 @@
 import pytest
 
 from app.agents import domain as domain_agent
-from app.agents.clarification import RequestType, classify_request, extract_fields, build_pending_request
+from app.agents.clarification import RequestType, classify_request, extract_fields, build_pending_request, next_question
 from app.state import ChatState
 
 
@@ -279,7 +279,7 @@ async def test_access_pending_parses_multiple_fields_from_single_message(monkeyp
     captured = {}
 
     async def fake_extract_fields(*args, **kwargs):
-        return {"resource": None, "requested_role": None, "justification": None}
+        return {"resource": None, "requested_role": None, "justification": None, "needed_by_date": None}
 
     async def fake_call_tool(state, service, path, payload, action_type):
         captured["payload"] = payload
@@ -289,13 +289,13 @@ async def test_access_pending_parses_multiple_fields_from_single_message(monkeyp
     monkeypatch.setattr(domain_agent, "_call_tool", fake_call_tool)
 
     state = ChatState(
-        message="Please grant write access to repo-payments for deployment tasks",
+        message="Please grant write access to repo-payments for deployment tasks by 20 Aug 2026",
         domain="it",
         pending_request={
             "domain": "it",
             "type": RequestType.ACCESS,
             "filled": {},
-            "missing": ["resource", "requested_role", "justification"],
+            "missing": ["resource", "requested_role", "justification", "needed_by_date"],
             "step": "collecting_details",
         },
         actions=[],
@@ -308,6 +308,7 @@ async def test_access_pending_parses_multiple_fields_from_single_message(monkeyp
     assert captured["payload"]["requested_role"] == "editor"
     assert captured["payload"]["resource"] == "repo-payments"
     assert "deployment tasks" in captured["payload"]["justification"].lower()
+    assert captured["payload"]["needed_by_date"] == "2026-08-20"
 
 
 @pytest.mark.asyncio
@@ -315,7 +316,7 @@ async def test_ticket_pending_parses_subtype_description_and_location(monkeypatc
     captured = {}
 
     async def fake_extract_fields(*args, **kwargs):
-        return {"subtype": None, "description": None, "location": None, "entity": None}
+        return {"subtype": None, "description": None, "location": None, "entity": None, "incident_date": None}
 
     async def fake_call_tool(state, service, path, payload, action_type):
         captured["payload"] = payload
@@ -325,13 +326,13 @@ async def test_ticket_pending_parses_subtype_description_and_location(monkeypatc
     monkeypatch.setattr(domain_agent, "_call_tool", fake_call_tool)
 
     state = ChatState(
-        message="The AC is broken in Room 12",
+        message="The AC is broken in Room 12 on 10 Aug 2026",
         domain="it",
         pending_request={
             "domain": "it",
             "type": RequestType.TICKET,
             "filled": {},
-            "missing": ["subtype", "description", "location", "entity"],
+            "missing": ["subtype", "description", "location", "entity", "incident_date"],
             "step": "collecting_details",
         },
         actions=[],
@@ -345,6 +346,7 @@ async def test_ticket_pending_parses_subtype_description_and_location(monkeypatc
     assert "ac is broken" in captured["payload"]["description"].lower()
     assert "room 12" in captured["payload"]["location"].lower()
     assert captured["payload"]["category"] == "ac"
+    assert captured["payload"]["incident_date"] == "2026-08-10"
 
 
 def test_ticket_missing_fields_require_location_entity():
@@ -353,7 +355,7 @@ def test_ticket_missing_fields_require_location_entity():
         RequestType.TICKET,
         {"subtype": "it", "description": "printer not working"},
     )
-    assert pending["missing"] == ["location", "entity"]
+    assert pending["missing"] == ["location", "entity", "incident_date"]
 
 
 @pytest.mark.asyncio
@@ -429,3 +431,77 @@ def test_build_pending_request_marks_invalid_currency_missing():
         {"amount": "100", "currency": "money", "date": "2025-06-23", "category": "hotel"},
     )
     assert "currency" in pending_invalid["missing"]
+
+
+def test_build_pending_workspace_marks_generic_resource_name_missing():
+    pending = build_pending_request(
+        "workspace",
+        RequestType.WORKSPACE_BOOKING,
+        {
+            "resource_type": "room",
+            "resource_name": "meeting room",
+            "start_time": "2026-08-10 10:00",
+            "end_time": "2026-08-10 11:00",
+        },
+    )
+    assert "resource_name" in pending["missing"]
+
+
+def test_build_pending_workspace_accepts_specific_room_name():
+    pending = build_pending_request(
+        "workspace",
+        RequestType.WORKSPACE_BOOKING,
+        {
+            "resource_type": "room",
+            "resource_name": "Room 12",
+            "start_time": "2026-08-10 10:00",
+            "end_time": "2026-08-10 11:00",
+        },
+    )
+    assert "resource_name" not in pending["missing"]
+
+
+def test_next_question_lists_all_missing_details():
+    pending = {
+        "missing": ["resource_type", "resource_name", "start_time", "end_time"],
+    }
+    text = next_question(pending).lower()
+    assert "i still need these details" in text
+    assert "what do you want to book" in text
+    assert "which resource should i book" in text
+    assert "start time" in text
+    assert "end time" in text
+
+
+@pytest.mark.asyncio
+async def test_workspace_prompt_lists_all_missing_with_room_suggestions(monkeypatch):
+    async def fake_list_resources(resource_type):
+        if resource_type == "room":
+            return [{"name": "Orion"}, {"name": "Zephyr"}]
+        return []
+
+    monkeypatch.setattr(domain_agent, "_list_resources", fake_list_resources)
+    pending = {
+        "filled": {"resource_type": "room"},
+        "missing": ["resource_name", "start_time", "end_time"],
+    }
+    text = (await domain_agent._workspace_prompt(pending, {})).lower()
+    assert "orion" in text and "zephyr" in text
+    assert "start and end time" in text
+
+
+def test_failure_followup_keeps_only_truly_missing_fields():
+    pending = {
+        "type": RequestType.ACCESS,
+        "filled": {
+            "resource": "repo-x",
+            "requested_role": "editor",
+            "justification": None,
+            "needed_by_date": "2026-08-20",
+        },
+        "missing": ["resource", "requested_role", "justification", "needed_by_date"],
+    }
+    msg = domain_agent._failure_followup(RequestType.ACCESS, pending, None)
+    assert pending["missing"] == ["justification"]
+    assert "justification" in msg.lower()
+    assert "resource" not in msg.lower()

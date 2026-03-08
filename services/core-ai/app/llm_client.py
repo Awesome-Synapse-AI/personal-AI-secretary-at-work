@@ -34,6 +34,28 @@ async def call_llm_json(system_prompt: str, user_message: str, max_tokens: int) 
     if payload is not None:
         return payload
 
+    # If generation is truncated, retry once with a larger token budget and tighter instruction.
+    if _is_truncated(raw):
+        retry_max_tokens = min(MAX_OUTPUT_TOKENS, max(max_tokens * 2, 128))
+        retry_prompt = (
+            f"{system_prompt} "
+            "Return compact JSON only. Do not include reasoning or explanatory text."
+        )
+        retried_content, retried_raw = await _call_llm(
+            retry_prompt,
+            user_message,
+            retry_max_tokens,
+            enforce_json=True,
+            stream=False,
+        )
+        if retried_raw is not None:
+            logger.info("llm_response_retry_raw", raw=_truncate(json.dumps(retried_raw, default=str), 600))
+        retried_payload = _parse_json_payload(retried_content)
+        if retried_payload is not None:
+            return retried_payload
+        if retried_content:
+            content = retried_content
+
     if not content:
         return None
 
@@ -217,3 +239,15 @@ def _strip_think_tags(text: str) -> str:
             break
         i = end + len(end_tag)
     return "".join(out).strip()
+
+
+def _is_truncated(raw: dict | None) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    choices = raw.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return False
+    return choice.get("finish_reason") == "length"

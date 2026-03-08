@@ -45,8 +45,10 @@ QUESTION_MAP = {
     "resource": "Which system or repo do you need access to?",
     "requested_role": "What level of access do you need (read, write, admin)?",
     "justification": "Briefly explain why you need this access.",
+    "needed_by_date": "When do you need this access by? Please use DD/MM/YYYY.",
     "resource_type": "What do you want to book (room, desk, equipment, parking)?",
     "resource_name": "Which resource should I book (e.g., Room 1, Desk #2)?",
+    "incident_date": "When did this issue happen? Please use DD/MM/YYYY.",
 }
 
 REQUEST_TYPES_BY_DOMAIN = {
@@ -60,8 +62,8 @@ FIELD_SETS = {
     RequestType.LEAVE: ["leave_type", "start_date", "end_date", "reason"],
     RequestType.EXPENSE: ["amount", "currency", "date", "category", "project_code"],
     RequestType.TRAVEL: ["origin", "destination", "departure_date", "return_date", "class"],
-    RequestType.ACCESS: ["resource", "requested_role", "justification"],
-    RequestType.TICKET: ["subtype", "description", "location", "entity"],
+    RequestType.ACCESS: ["resource", "requested_role", "justification", "needed_by_date"],
+    RequestType.TICKET: ["subtype", "description", "location", "entity", "incident_date"],
     RequestType.WORKSPACE_BOOKING: [
         "resource_type",
         "resource_name",
@@ -77,8 +79,8 @@ FIELD_DESCRIPTIONS = {
     RequestType.LEAVE: "leave_type, start_date (DD/MM/YYYY), end_date (DD/MM/YYYY), reason",
     RequestType.EXPENSE: "amount (number), currency (ISO 4217), date (DD/MM/YYYY), category, project_code",
     RequestType.TRAVEL: "origin, destination, departure_date (DD/MM/YYYY), return_date (DD/MM/YYYY), class",
-    RequestType.ACCESS: "resource, requested_role (read/write/admin), justification",
-    RequestType.TICKET: "subtype (it or facilities), description, location, entity (asset like printer/laptop/software/network)",
+    RequestType.ACCESS: "resource, requested_role (read/write/admin), justification, needed_by_date (DD/MM/YYYY)",
+    RequestType.TICKET: "subtype (it or facilities), description, location, entity (asset like printer/laptop/software/network), incident_date (DD/MM/YYYY)",
     RequestType.WORKSPACE_BOOKING: "resource_type (room/desk/equipment/parking), resource_name, start_time (include date if present), end_time (include date if present), location, description",
 }
 
@@ -179,7 +181,17 @@ def next_question(pending: dict[str, Any]) -> str:
     missing = pending.get("missing", [])
     if not missing:
         return ""
-    return QUESTION_MAP.get(missing[0], "Could you clarify the missing detail?")
+    prompts: list[str] = []
+    for field in missing:
+        prompts.append(
+            QUESTION_MAP.get(
+                field,
+                f"Please provide {str(field).replace('_', ' ')}.",
+            )
+        )
+    if len(prompts) == 1:
+        return prompts[0]
+    return "I still need these details:\n- " + "\n- ".join(prompts)
 
 
 def _classification_prompt(domain: str, allowed: list[RequestType]) -> str:
@@ -252,23 +264,23 @@ def _extraction_guidance(request_type: RequestType) -> str:
         return (
             "Rules: requested_role should be read/write/admin. "
             "Examples:\n"
-            'Input: "Give me write access to repo analytics for reporting"\n'
-            'Output: {"request_type":"access","fields":{"resource":"repo analytics","requested_role":"write","justification":"for reporting"}}\n'
+            'Input: "Give me write access to repo analytics for reporting by 15/03/2026"\n'
+            'Output: {"request_type":"access","fields":{"resource":"repo analytics","requested_role":"write","justification":"for reporting","needed_by_date":"2026-03-15"}}\n'
             'Input: "Need read access to finance-dashboard"\n'
-            'Output: {"request_type":"access","fields":{"resource":"finance-dashboard","requested_role":"read","justification":null}}\n'
-            'Input: "Admin access to Jira because I manage the project"\n'
-            'Output: {"request_type":"access","fields":{"resource":"Jira","requested_role":"admin","justification":"manage the project"}}'
+            'Output: {"request_type":"access","fields":{"resource":"finance-dashboard","requested_role":"read","justification":null,"needed_by_date":null}}\n'
+            'Input: "Admin access to Jira because I manage the project from 2026-04-01"\n'
+            'Output: {"request_type":"access","fields":{"resource":"Jira","requested_role":"admin","justification":"manage the project","needed_by_date":"2026-04-01"}}'
         )
     if request_type == RequestType.TICKET:
         return (
             "Rules: subtype is it or facilities; description should summarize the issue; entity is the affected asset. "
             "Examples:\n"
-            'Input: "AC broken in Room 12"\n'
-            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"AC broken","location":"Room 12","entity":"ac"}}\n'
+            'Input: "AC broken in Room 12 since 10/03/2026"\n'
+            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"AC broken","location":"Room 12","entity":"ac","incident_date":"2026-03-10"}}\n'
             'Input: "VPN keeps dropping on my laptop"\n'
-            'Output: {"request_type":"ticket","fields":{"subtype":"it","description":"VPN keeps dropping","location":null,"entity":"vpn"}}\n'
-            'Input: "Projector not working in Meeting Room A"\n'
-            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"Projector not working","location":"Meeting Room A","entity":"projector"}}'
+            'Output: {"request_type":"ticket","fields":{"subtype":"it","description":"VPN keeps dropping","location":null,"entity":"vpn","incident_date":null}}\n'
+            'Input: "Projector not working in Meeting Room A on 2026-04-05"\n'
+            'Output: {"request_type":"ticket","fields":{"subtype":"facilities","description":"Projector not working","location":"Meeting Room A","entity":"projector","incident_date":"2026-04-05"}}'
         )
     if request_type == RequestType.WORKSPACE_BOOKING:
         return (
@@ -308,7 +320,7 @@ def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | 
                 value = _normalize_amount(value)
             elif key == "currency":
                 value = _normalize_currency(value)
-        if value and key in {"start_date", "end_date", "date", "departure_date", "return_date"}:
+        if value and key in {"start_date", "end_date", "date", "departure_date", "return_date", "needed_by_date", "incident_date"}:
             iso = _to_iso_date(value)
             value = iso or value  # fallback to original if parse fails so we can prompt again later
         if req_enum == RequestType.ACCESS and key == "requested_role" and value is not None:
@@ -422,6 +434,8 @@ def _filter_fields_by_evidence(
             cleaned["requested_role"] = None
         if cleaned.get("justification") and not _has_substring(cleaned.get("justification")):
             cleaned["justification"] = None
+        if not _has_date_evidence():
+            cleaned["needed_by_date"] = None
     elif req_enum == RequestType.TICKET:
         if cleaned.get("subtype") and not _has_substring(cleaned.get("subtype")):
             cleaned["subtype"] = None
@@ -431,6 +445,8 @@ def _filter_fields_by_evidence(
             cleaned["location"] = None
         if cleaned.get("entity") and not _has_substring(cleaned.get("entity")):
             cleaned["entity"] = None
+        if not _has_date_evidence():
+            cleaned["incident_date"] = None
     elif req_enum == RequestType.WORKSPACE_BOOKING:
         if cleaned.get("resource_type") and not _has_resource_type(cleaned.get("resource_type")):
             cleaned["resource_type"] = None
@@ -451,11 +467,49 @@ def _looks_like_workspace_value(field: str, value: str) -> bool:
         return False
     if field == "resource_name":
         # allow alphanumerics/space/#+- and short names
-        return bool(re.match(r"^[A-Za-z0-9 #+-]{1,40}$", text))
+        if not bool(re.match(r"^[A-Za-z0-9 #+-]{1,40}$", text)):
+            return False
+        if _is_generic_workspace_resource_name(text):
+            return False
+        return True
     if field in {"start_time", "end_time"}:
         # must contain a digit to be considered a time stamp
         return any(ch.isdigit() for ch in text)
     return True
+
+
+def _is_generic_workspace_resource_name(value: str) -> bool:
+    text = re.sub(r"\s+", " ", (value or "").strip().lower())
+    if not text:
+        return True
+    generic_exact = {
+        "room",
+        "meeting room",
+        "conference room",
+        "boardroom",
+        "desk",
+        "hot desk",
+        "workstation",
+        "seat",
+        "equipment",
+        "projector",
+        "monitor",
+        "laptop",
+        "whiteboard",
+        "parking",
+        "parking spot",
+        "parking space",
+        "garage",
+    }
+    if text in generic_exact:
+        return True
+    # Generic "<type> <number>" variants are acceptable (e.g., room 12, desk a3, parking b2).
+    if re.match(r"^(room|desk|parking(?: spot| space)?|equipment)\s+[a-z0-9-]+$", text):
+        return False
+    # Reject generic phrases ending in resource type without specific identity.
+    if re.match(r"^(meeting|conference|board|hot)\s+(room|desk)$", text):
+        return True
+    return False
 
 
 def _merge_fields(*dicts: dict[str, Any]) -> dict[str, Any]:
@@ -479,9 +533,9 @@ def _missing_fields(pending: dict[str, Any]) -> list[str]:
     elif req_enum == RequestType.TRAVEL:
         required = ["origin", "destination", "departure_date", "return_date"]
     elif req_enum == RequestType.ACCESS:
-        required = ["resource", "requested_role", "justification"]
+        required = ["resource", "requested_role", "justification", "needed_by_date"]
     elif req_enum == RequestType.TICKET:
-        required = ["subtype", "description", "location", "entity"]
+        required = ["subtype", "description", "location", "entity", "incident_date"]
     elif req_enum == RequestType.WORKSPACE_BOOKING:
         required = ["resource_type", "resource_name", "start_time", "end_time"]
     else:

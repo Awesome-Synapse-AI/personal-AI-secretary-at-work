@@ -78,3 +78,18 @@ def test_ticket_category_populated_from_entity(client):
     assert resp.status_code == 200
     ticket = resp.json()["ticket"]
     assert ticket["category"] == "projector"
+
+
+def test_create_ticket_accepts_incident_date(client):
+    resp = client.post(
+        f"{settings.api_prefix}/domain/tickets",
+        json={
+            "type": "facilities",
+            "description": "AC not cooling",
+            "location": "HQ-3F",
+            "category": "ac",
+            "incident_date": "2026-08-10",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ticket"]["incident_date"] == "2026-08-10"

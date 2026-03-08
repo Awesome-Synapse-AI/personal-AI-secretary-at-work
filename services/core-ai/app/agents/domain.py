@@ -7,6 +7,7 @@ from langsmith import traceable
 
 from app.state import ChatState
 from app.agents.clarification import (
+    QUESTION_MAP,
     RequestType,
     _as_request_type,
     build_pending_request,
@@ -309,54 +310,63 @@ async def _handle_workspace(
 
 async def _workspace_prompt(pending: dict[str, Any], state: ChatState) -> str:
     filled = pending.get("filled", {})
-    missing = pending.get("missing", [])
+    missing = list(pending.get("missing", []))
     resource_type = (filled.get("resource_type") or "").lower()
+    custom_prompts: dict[str, str] = {}
+    skip_fields: set[str] = set()
 
     if "resource_name" in missing and resource_type == "room":
         names = _resource_suggestions("rooms", await _list_resources("room"))
-        return f"Which room should I book? Available rooms: {names}."
-    if "resource_name" in missing and resource_type == "desk":
+        custom_prompts["resource_name"] = f"Which room should I book? Available rooms: {names}."
+    elif "resource_name" in missing and resource_type == "desk":
         names = _resource_suggestions("desks", await _list_resources("desk"))
-        return f"Which desk should I book? Available desks: {names}."
-    if "resource_name" in missing and resource_type == "equipment":
+        custom_prompts["resource_name"] = f"Which desk should I book? Available desks: {names}."
+    elif "resource_name" in missing and resource_type == "equipment":
         names = _resource_suggestions("equipment", await _list_resources("equipment"))
-        return f"Which equipment should I reserve? Available equipment: {names}."
-    if "resource_name" in missing and resource_type == "parking":
+        custom_prompts["resource_name"] = f"Which equipment should I reserve? Available equipment: {names}."
+    elif "resource_name" in missing and resource_type == "parking":
         names = _resource_suggestions("parking", await _list_resources("parking"))
-        return f"Which parking spot should I book? Available spots: {names}."
-    if "resource_name" in missing:
-        return "Which resource should I book (e.g., Room 1, Desk #2)?"
-    if "start_time" in missing or "end_time" in missing:
-        return "What start and end time should I use? Please give both start and end."
-    return next_question(pending)
+        custom_prompts["resource_name"] = f"Which parking spot should I book? Available spots: {names}."
+    elif "resource_name" in missing:
+        custom_prompts["resource_name"] = "Which resource should I book (e.g., Room 1, Desk #2)?"
+
+    if "start_time" in missing and "end_time" in missing:
+        custom_prompts["start_time"] = "What start and end time should I use? Please give both start and end."
+        skip_fields.add("end_time")
+    elif "start_time" in missing:
+        custom_prompts["start_time"] = QUESTION_MAP.get("start_time", "What is the start time?")
+    elif "end_time" in missing:
+        custom_prompts["end_time"] = QUESTION_MAP.get("end_time", "What is the end time?")
+
+    return _compose_missing_prompt(missing, custom_prompts, skip_fields)
 
 
 async def _ticket_prompt(pending: dict[str, Any], state: ChatState) -> str:
     filled = pending.get("filled", {})
-    missing = pending.get("missing", [])
-    subtype = (pending.get("subtype") or filled.get("subtype") or "").lower()
+    missing = list(pending.get("missing", []))
+    custom_prompts: dict[str, str] = {}
     if "location" in missing:
         room_names, area_names, equipment_names = await _facility_location_suggestions(state)
         if room_names and area_names and equipment_names:
-            return (
+            custom_prompts["location"] = (
                 "Which room or area is this in? "
                 f"Available rooms: {room_names}. Areas/locations: {area_names}. Equipment: {equipment_names}."
             )
-        if room_names and area_names:
-            return f"Which room or area is this in? Available rooms: {room_names}. Areas/locations: {area_names}."
-        if room_names and equipment_names:
-            return f"Which room is this in? Available rooms: {room_names}. Equipment: {equipment_names}."
-        if area_names and equipment_names:
-            return f"Which area or location is this in? Areas/locations: {area_names}. Equipment: {equipment_names}."
-        if room_names:
-            return f"Which room is this in? Available rooms: {room_names}."
-        if area_names:
-            return f"Which area or location is this in? Areas/locations: {area_names}."
-        if equipment_names:
-            return f"Which equipment is this related to? Equipment: {equipment_names}."
-    if "entity" in missing:
-        return "Which asset is affected (printer, laptop, software, network, projector, etc.)?"
-    return next_question(pending)
+        elif room_names and area_names:
+            custom_prompts["location"] = f"Which room or area is this in? Available rooms: {room_names}. Areas/locations: {area_names}."
+        elif room_names and equipment_names:
+            custom_prompts["location"] = f"Which room is this in? Available rooms: {room_names}. Equipment: {equipment_names}."
+        elif area_names and equipment_names:
+            custom_prompts["location"] = f"Which area or location is this in? Areas/locations: {area_names}. Equipment: {equipment_names}."
+        elif room_names:
+            custom_prompts["location"] = f"Which room is this in? Available rooms: {room_names}."
+        elif area_names:
+            custom_prompts["location"] = f"Which area or location is this in? Areas/locations: {area_names}."
+        elif equipment_names:
+            custom_prompts["location"] = f"Which equipment is this related to? Equipment: {equipment_names}."
+    if "entity" in missing and "entity" not in custom_prompts:
+        custom_prompts["entity"] = "Which asset is affected (printer, laptop, software, network, projector, etc.)?"
+    return _compose_missing_prompt(missing, custom_prompts)
 
 
 async def _list_resources(resource_type: str) -> list[dict]:
@@ -554,6 +564,7 @@ async def _submit_ticket_request(pending: dict[str, Any], state: ChatState) -> d
         "description": pending["filled"].get("description"),
         "location": pending["filled"].get("location"),
         "category": pending["filled"].get("entity"),
+        "incident_date": _to_iso_date(pending["filled"].get("incident_date")),
     }
     return await _call_tool(state, "ticket", "/tickets", payload, "ticket_request")
 
@@ -564,6 +575,7 @@ async def _submit_access_request(pending: dict[str, Any], state: ChatState) -> d
         "resource": pending["filled"].get("resource"),
         "requested_role": requested_role,
         "justification": pending["filled"].get("justification"),
+        "needed_by_date": _to_iso_date(pending["filled"].get("needed_by_date")),
     }
     return await _call_tool(state, "access", "/access-requests", payload, "access_request")
 
@@ -702,11 +714,13 @@ def _required_fields(req_enum: RequestType | None, filled: dict[str, Any] | None
     if req_enum == RequestType.TRAVEL:
         return ["origin", "destination", "departure_date", "return_date"]
     if req_enum == RequestType.ACCESS:
-        return ["resource", "requested_role", "justification"]
+        return ["resource", "requested_role", "justification", "needed_by_date"]
     if req_enum == RequestType.TICKET:
-        required = ["subtype", "description"]
+        required = ["subtype", "description", "incident_date"]
         if filled.get("subtype") == "facilities":
             required.append("location")
+        if "entity" not in required:
+            required.append("entity")
         return required
     if req_enum == RequestType.WORKSPACE_BOOKING:
         return ["resource_type", "resource_name", "start_time", "end_time"]
@@ -719,7 +733,9 @@ def _failure_followup(
     error: object,
     hint: str | None = None,
 ) -> str:
-    fields = _required_fields(req_enum, pending.get("filled", {}))
+    filled = pending.get("filled", {})
+    required = _required_fields(req_enum, filled)
+    fields = [key for key in required if _is_missing(filled.get(key))]
     if fields:
         pending["missing"] = fields
     message = "I couldn't submit that yet."
@@ -730,6 +746,26 @@ def _failure_followup(
     if fields:
         message += f" Please provide/confirm: {', '.join(fields)}."
     return message
+
+
+def _compose_missing_prompt(
+    missing: list[str],
+    custom_prompts: dict[str, str] | None = None,
+    skip_fields: set[str] | None = None,
+) -> str:
+    prompts: list[str] = []
+    custom = custom_prompts or {}
+    skip = skip_fields or set()
+    for field in missing:
+        if field in skip:
+            continue
+        prompt = custom.get(field) or QUESTION_MAP.get(field) or f"Please provide {field.replace('_', ' ')}."
+        prompts.append(prompt)
+    if not prompts:
+        return "Could you clarify the missing details?"
+    if len(prompts) == 1:
+        return prompts[0]
+    return "I still need these details:\n- " + "\n- ".join(prompts)
 
 
 def _leave_success(pending: dict[str, Any]) -> str:
@@ -880,7 +916,7 @@ def _coerce_answer_for_field(field: str, message: str) -> Any:
     text = (message or "").strip()
     if not text:
         return None
-    if field in {"start_date", "end_date", "date", "departure_date", "return_date"}:
+    if field in {"start_date", "end_date", "date", "departure_date", "return_date", "needed_by_date", "incident_date"}:
         if not _looks_like_date_expression(text):
             return None
         return _parse_iso_date_strict(text)
@@ -1054,6 +1090,9 @@ def _infer_access_fields(text: str) -> dict[str, Any]:
         fields["resource"] = m.group(1)
     if len(text.strip()) > 8:
         fields["justification"] = text.strip()
+    date_value = _parse_iso_date_strict(text)
+    if date_value:
+        fields["needed_by_date"] = date_value
     return fields
 
 
@@ -1074,6 +1113,9 @@ def _infer_ticket_fields(text: str) -> dict[str, Any]:
     )
     if asset_match:
         fields["entity"] = asset_match.group(1)
+    date_value = _parse_iso_date_strict(text)
+    if date_value:
+        fields["incident_date"] = date_value
 
     return fields
 

@@ -81,6 +81,7 @@ class Ticket(SQLModel, table=True):
     category: Optional[str] = None
     description: str
     location: Optional[str] = None
+    incident_date: Optional[date] = None
     priority: Optional[str] = None
     status: TicketStatus = Field(default=TicketStatus.OPEN)
     assignee: Optional[str] = None
@@ -114,6 +115,7 @@ class AccessRequest(SQLModel, table=True):
     resource: str
     requested_role: "RequestedRole"
     justification: str
+    needed_by_date: Optional[date] = None
     status: AccessStatus = Field(default=AccessStatus.PENDING)
     approver_id: Optional[str] = None
     reject_reason: Optional[str] = None
@@ -284,6 +286,7 @@ class AccessRequestInput(BaseModel):
     resource: str
     requested_role: str
     justification: str
+    needed_by_date: str | None = None
 
 
 class TicketInput(BaseModel):
@@ -291,6 +294,7 @@ class TicketInput(BaseModel):
     category: str | None = None
     description: str
     location: str | None = None
+    incident_date: str | None = None
     priority: str | None = None
 
 
