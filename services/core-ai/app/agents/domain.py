@@ -19,6 +19,8 @@ from app.agents.clarification import (
     _normalize_resource_type,
 )
 from app.agents.tools import tool_runner
+from app.config import settings
+from app.llm_client import call_llm_text
 
 logger = structlog.get_logger("domain_agent")
 
@@ -410,26 +412,86 @@ async def _handle_doc_qa(
     if not message.strip():
         return "Upload a document and ask your question.", pending, []
 
+    doc_scope = state.get("doc_scope") or "user_docs"
+    payload = {"query": message, "top_k": settings.qdrant_top_k, "scope": doc_scope}
+    if doc_scope == "user_docs":
+        user_id = (state.get("user") or {}).get("sub") or "demo-user"
+        payload["owner"] = user_id
+
     action = await _call_tool(
         state,
         "doc_qa",
         "/documents/search",
-        {"query": message, "top_k": 3},
+        payload,
         "doc_search",
     )
     if action.get("status") == "failed":
-        return f"I couldn't search documents: {action.get('error')}", pending, [action]
+        hint = action.get("error") or "Search service unavailable"
+        return f"I couldn't search documents: {hint}", pending, [action]
 
     results = action.get("result", {}).get("matches") if action.get("result") else None
     if not results:
-        return "I searched your documents but found no relevant matches.", pending, [action]
+        scope_label = doc_scope.replace("_", " ")
+        return f"I searched the {scope_label} documents but found no relevant matches.", pending, [action]
 
-    lines = ["Here are the most relevant document snippets:"]
-    for idx, hit in enumerate(results, 1):
+    scope_label = (
+        "HR policies" if doc_scope == "policy_hr"
+        else "IT policies" if doc_scope == "policy_it"
+        else "Travel & expense policies" if doc_scope == "policy_travel_expense"
+        else "your documents"
+    )
+
+    # Build a compact context for answer synthesis.
+    context_lines: list[str] = []
+    seen_snippets: set[str] = set()
+    max_nodes = max(1, int(settings.qdrant_top_k))
+    for hit in results:
         title = hit.get("title") or "Untitled"
-        score = round(float(hit.get("score", 0)), 3)
-        path = hit.get("path")
-        lines.append(f"{idx}. {title} (score {score}) - {path}")
+        snippet = (hit.get("snippet") or "").strip()
+        if snippet:
+            snippet = snippet[:600]
+        if not snippet or snippet in seen_snippets:
+            continue
+        seen_snippets.add(snippet)
+        context_lines.append(f"{title}: {snippet}")
+        if len(context_lines) >= max_nodes:
+            break
+
+    system_prompt = (
+        "You answer employee policy questions using provided context only. "
+        "Respond in clear natural language. "
+        "If the context is insufficient, say what is missing. "
+        "Do not reveal reasoning or chain-of-thought. Provide the final answer only."
+    )
+    context_block = "\n".join([f"### node-{idx}: {line.split(': ', 1)[-1]}" for idx, line in enumerate(context_lines, 1)])
+    user_prompt = (
+        "Instruction: use below context to answer user's question.\n"
+        "## context\n"
+        f"{context_block}\n\n"
+        f"## question: {message}\n"
+        "## answer:\n"
+    )
+    print('-'*30)
+    print(user_prompt)
+    print('-'*30)
+    answer = await call_llm_text(system_prompt, user_prompt, max_tokens=2048)
+    if answer:
+        cleaned = answer.strip()
+        rewrite_prompt = (
+            "Rewrite the response into a concise final answer that directly answers the question. "
+            "No reasoning, no analysis, no chain-of-thought."
+        )
+        rewrite_input = f"Question: {message}\nAnswer: {cleaned}"
+        rewritten = await call_llm_text(rewrite_prompt, rewrite_input, max_tokens=2048)
+        if rewritten:
+            cleaned = rewritten.strip()
+        return cleaned, pending, [action]
+
+    # Fallback: show a brief list if synthesis fails.
+    lines = [f"I looked in {scope_label} and found {len(results)} relevant match(es)."]
+    for idx, hit in enumerate(results[:3], 1):
+        title = hit.get("title") or "Untitled"
+        lines.append(f"- {idx}. {title}")
     return "\n".join(lines), pending, [action]
 
 
@@ -1185,4 +1247,3 @@ def _parse_iso_date_strict(text: str) -> str | None:
         if dt:
             return dt.date().isoformat()
     return None
-

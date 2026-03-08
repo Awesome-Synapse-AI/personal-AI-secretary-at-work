@@ -12,6 +12,16 @@ logger = structlog.get_logger("llm_client")
 MAX_OUTPUT_TOKENS = 1024
 
 
+@traceable(name="call_llm_text", run_type="llm")
+async def call_llm_text(system_prompt: str, user_message: str, max_tokens: int) -> str | None:
+    content, raw = await _call_llm(
+        system_prompt, user_message, max_tokens, enforce_json=False, stream=False
+    )
+    if raw is not None:
+        logger.info("llm_response_raw", raw=_truncate(json.dumps(raw, default=str), 600))
+    return content
+
+
 @traceable(name="call_llm_json", run_type="llm")
 async def call_llm_json(system_prompt: str, user_message: str, max_tokens: int) -> dict | None:
     # Request JSON-formatted output to improve parsing reliability with Ollama.
@@ -110,10 +120,8 @@ async def _call_llm(
     if settings.llm_api_key:
         headers["Authorization"] = f"Bearer {settings.llm_api_key}"
 
-    # Cap generation to avoid runaway outputs.
-    # effective_max_tokens = min(max_tokens, MAX_OUTPUT_TOKENS)
-
-    effective_max_tokens = MAX_OUTPUT_TOKENS
+    # Cap generation to avoid runaway outputs while honoring caller intent.
+    effective_max_tokens = min(max_tokens, MAX_OUTPUT_TOKENS)
 
     payload = {
         "model": settings.llm_model,
@@ -133,18 +141,31 @@ async def _call_llm(
         payload["stream"] = bool(stream)
 
     start = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
-            response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-    except Exception as exc:
-        record_llm_error(settings.llm_model, exc.__class__.__name__)
-        logger.exception("llm_request_failed", error=str(exc))
-        return None, None
-    finally:
+    data = None
+    last_exc: Exception | None = None
+    timeout_seconds = settings.llm_timeout_seconds
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                last_exc = None
+                break
+        except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+            last_exc = exc
+            timeout_seconds = max(timeout_seconds * 2, timeout_seconds + 5)
+        except Exception as exc:
+            last_exc = exc
+            break
+    if data is None:
+        record_llm_error(settings.llm_model, last_exc.__class__.__name__ if last_exc else "UnknownError")
+        logger.exception("llm_request_failed", error=str(last_exc or "unknown"))
         duration = time.perf_counter() - start
         record_llm_timing(settings.llm_model, duration, bool(stream))
+        return None, None
+    duration = time.perf_counter() - start
+    record_llm_timing(settings.llm_model, duration, bool(stream))
 
     choice = data.get("choices", [{}])[0]
     message = choice.get("message", {}) or {}
@@ -155,6 +176,10 @@ async def _call_llm(
         or message.get("reasoning")
         or choice.get("text", "")
     )
+
+    # Strip any chain-of-thought wrapped in <think>...</think>.
+    if raw_content:
+        raw_content = _strip_think_tags(raw_content)
 
     if not raw_content:
         extracted = _extract_json_object(json.dumps(choice))
@@ -172,3 +197,23 @@ async def _call_llm(
 
 def _truncate(text: str, length: int) -> str:
     return text if len(text) <= length else f"{text[:length]}..."
+
+
+def _strip_think_tags(text: str) -> str:
+    start_tag = "<think>"
+    end_tag = "</think>"
+    if start_tag not in text:
+        return text
+    out = []
+    i = 0
+    while i < len(text):
+        start = text.find(start_tag, i)
+        if start == -1:
+            out.append(text[i:])
+            break
+        out.append(text[i:start])
+        end = text.find(end_tag, start + len(start_tag))
+        if end == -1:
+            break
+        i = end + len(end_tag)
+    return "".join(out).strip()

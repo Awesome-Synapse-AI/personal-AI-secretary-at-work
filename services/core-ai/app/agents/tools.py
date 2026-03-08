@@ -16,7 +16,15 @@ class ToolRunner:
         if not settings.tools_enabled:
             return {"status": "skipped", "service": service, "reason": "TOOLS_ENABLED=false"}
 
-        url = f"{settings.domain_service_url}{path}"
+        if path.startswith("http"):
+            url = path
+        else:
+            base = settings.domain_service_url.rstrip("/")
+            # Document search lives on the core API prefix, not /domain.
+            if service == "doc_qa":
+                base = settings.core_api_url.rstrip("/")
+            url = f"{base}{path}"
+
         headers = {}
         if settings.service_auth_token:
             headers["Authorization"] = f"Bearer {settings.service_auth_token}"

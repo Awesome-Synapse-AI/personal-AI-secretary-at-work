@@ -87,6 +87,7 @@ export interface DocumentSearchHit {
   score: number;
   chunk_index: number;
   path: string;
+  snippet?: string | null;
 }
 
 export type ChatEvent = {

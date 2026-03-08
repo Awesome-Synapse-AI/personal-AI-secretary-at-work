@@ -36,6 +36,8 @@ class Settings(BaseSettings):
 
     # single container mode: domain endpoints mounted in core-ai under /api/v1/domain
     domain_service_url: str = "http://localhost:8000/api/v1/domain"
+    # root API base for calling first-party endpoints (e.g., document search)
+    core_api_url: str = "http://localhost:8000/api/v1"
 
     # MinIO / S3-compatible storage for documents
     storage_endpoint: str | None = None  # e.g., http://minio:9000
@@ -64,6 +66,8 @@ class Settings(BaseSettings):
     embedding_vector_size: int = 384  # dimension for MiniLM
     hf_token: str | None = None  # set to your HF token to avoid rate limits
     huggingface_hub_cache: str | None = "./hf-cache"
+    qdrant_similarity_cutoff: float = 0.3
+    qdrant_top_k: int = 30
 
     upload_dir: str = "./data/uploads"
 

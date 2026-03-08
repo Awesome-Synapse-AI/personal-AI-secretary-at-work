@@ -7,6 +7,7 @@ class ChatState(TypedDict, total=False):
     message: str
     user: dict[str, Any]
     domain: str
+    doc_scope: str
     sensitivity: str
     pending_request: dict[str, Any] | None
     response: str

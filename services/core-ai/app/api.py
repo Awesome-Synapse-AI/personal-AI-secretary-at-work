@@ -16,6 +16,7 @@ import boto3
 import pytesseract
 from PIL import Image
 from llama_index.core import Document as LlamaDocument, VectorStoreIndex
+from llama_index.core.node_parser import HierarchicalNodeParser, SentenceSplitter
 from llama_index.core.schema import TextNode
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -112,10 +113,20 @@ def _derive_session_title(messages: list[dict]) -> str:
         return f"{snippet}..." if len(first_line) > 60 else (snippet or "New chat")
 
     for msg in messages:
-        if msg.role == "user" and msg.content:
-            return _trim(msg.content)
+        role = getattr(msg, "role", None)
+        if role is None and isinstance(msg, dict):
+            role = msg.get("role")
+        content = getattr(msg, "content", None)
+        if content is None and isinstance(msg, dict):
+            content = msg.get("content")
+        if role == "user" and content:
+            return _trim(content)
     if messages:
-        return _trim(messages[0].content)
+        first = messages[0]
+        content = getattr(first, "content", None)
+        if content is None and isinstance(first, dict):
+            content = first.get("content")
+        return _trim(content)
     return "New chat"
 
 
@@ -1365,6 +1376,16 @@ async def upload_document(
     source: str = Form("manual"),
     session: Session = Depends(get_session),
 ):
+    # Auto-route known policy filenames into dedicated collections when scope is not specified.
+    if scope in {"public", "user_docs"}:
+        lower_name = filename.lower()
+        if "hr" in lower_name and "policy" in lower_name:
+            scope = "policy_hr"
+        elif "it" in lower_name and "policy" in lower_name:
+            scope = "policy_it"
+        elif "travel" in lower_name or "expense" in lower_name:
+            scope = "policy_travel_expense"
+
     name = f"{uuid.uuid4()}_{filename}"
     path = _upload_dir() / name
     with open(path, "wb") as f:
@@ -1438,7 +1459,30 @@ async def upload_document(
     session.commit()
     session.refresh(doc)
 
-    chunks = _chunk_text(text_content) if text_content else []
+    # Use hierarchical sentence-based chunking via LlamaIndex.
+    chunks: list[str] = []
+    try:
+        llama_doc = LlamaDocument(text=text_content)
+        node_parser = HierarchicalNodeParser.from_defaults(
+            node_parser_ids=["large", "mid", "small"],
+            node_parser_map={
+                "large": SentenceSplitter.from_defaults(chunk_size=1024, chunk_overlap=40),
+                "mid": SentenceSplitter.from_defaults(chunk_size=512, chunk_overlap=40),
+                "small": SentenceSplitter.from_defaults(chunk_size=128, chunk_overlap=40),
+            },
+        )
+        all_nodes = node_parser.get_nodes_from_documents([llama_doc])
+        seen_texts: set[str] = set()
+        for node in all_nodes:
+            text = node.get_content(metadata_mode="none")
+            if text and text not in seen_texts:
+                seen_texts.add(text)
+                chunks.append(text)
+    except Exception as exc:  # pragma: no cover - fallback to simple chunking
+        print(f"upload_document: hierarchical chunking failed: {exc}", flush=True)
+
+    if not chunks:
+        chunks = _chunk_text(text_content) if text_content else []
     if not chunks:
         chunks = [text_content]
 
@@ -1497,6 +1541,19 @@ async def search_documents(payload: DocumentSearchInput, session: Session = Depe
         raise HTTPException(502, "Embedding service unavailable")
     query_vec = vectors[0]
     results: list[dict] = []
+    seen: set[tuple[int, int | None]] = set()
+    snippet_len = 480
+
+    def _snippet_from_source(sn) -> str:
+        text = ""
+        try:
+            if hasattr(sn, "node") and getattr(sn, "node"):
+                text = sn.node.get_content(metadata_mode="none")
+            elif hasattr(sn, "text"):
+                text = sn.text  # type: ignore[assignment]
+        except Exception:
+            text = ""
+        return (text or "")[:snippet_len]
 
     client = _qdrant_client()
     collection = payload.collection or _choose_collection(payload.scope, None)
@@ -1506,7 +1563,10 @@ async def search_documents(payload: DocumentSearchInput, session: Session = Depe
             return {"matches": results}
         embed_model = _hf_embed_model()
         index = VectorStoreIndex.from_vector_store(vector_store=store, embed_model=embed_model)
-        retriever = index.as_retriever(similarity_top_k=payload.top_k)
+        retriever = index.as_retriever(
+            similarity_top_k=payload.top_k,
+            similarity_cutoff=settings.qdrant_similarity_cutoff,
+        )
         try:
             source_nodes = retriever.retrieve(payload.query)
         except Exception as exc:  # pragma: no cover
@@ -1526,13 +1586,23 @@ async def search_documents(payload: DocumentSearchInput, session: Session = Depe
                     continue
                 if payload.scope and doc.scope != payload.scope:
                     continue
+                score_val = 0.0
+                try:
+                    score_val = float(getattr(sn, "score", 0.0) or 0.0)
+                except Exception:
+                    score_val = 0.0
+                key = (doc.id, meta.get("chunk_index"))
+                if key in seen:
+                    continue
+                seen.add(key)
                 results.append(
                     {
                         "document_id": doc.id,
                         "title": doc.title,
-                        "score": sn.score if hasattr(sn, "score") else None,
+                        "score": score_val,
                         "chunk_index": meta.get("chunk_index"),
                         "path": doc.path,
+                        "snippet": _snippet_from_source(sn),
                     }
                 )
         return {"matches": results}
@@ -1562,6 +1632,7 @@ async def search_documents(payload: DocumentSearchInput, session: Session = Depe
                 "score": score,
                 "chunk_index": ch.chunk_index,
                 "path": doc.path,
+                "snippet": (ch.content or "")[:snippet_len],
             }
         )
     return {"matches": results}

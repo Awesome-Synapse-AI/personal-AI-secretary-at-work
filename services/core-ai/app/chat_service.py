@@ -50,7 +50,7 @@ async def handle_chat(
     await session_store.append_message(tenant_id, session_id, "assistant", result.get("response", ""))
 
     session_title = None
-    if mongo_db:
+    if mongo_db is not None:
         session_title = await _persist_chat_to_mongo(
             mongo_db=mongo_db,
             tenant_id=tenant_id,

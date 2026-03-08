@@ -304,7 +304,7 @@ class CalendarEventInput(BaseModel):
 
 class DocumentSearchInput(BaseModel):
     query: str
-    top_k: int = 5
+    top_k: int = 20
     owner: str | None = None
     scope: str | None = None
     collection: str | None = None  # optional override
