@@ -29,6 +29,18 @@ def _add_event(state: ChatState, event_type: str, data: dict | None = None) -> N
     state.setdefault("events", []).append({"type": event_type, "data": data or {}})
 
 
+async def _resolve_subroute_classification(
+    state: ChatState, domain: str, message: str
+) -> tuple[RequestType | None, dict[str, Any]]:
+    sub_route = state.get("sub_route")
+    sub_route_fields = state.get("sub_route_fields")
+    request_type = _as_request_type(sub_route)
+    if request_type is not None:
+        fields = sub_route_fields if isinstance(sub_route_fields, dict) else {}
+        return request_type, fields
+    return await classify_request(domain, message)
+
+
 def _domain_intro(domain: str) -> str:
     if domain == "hr":
         return (
@@ -78,9 +90,18 @@ def _domain_intro(domain: str) -> str:
 
 @traceable(name="domain_node", run_type="chain")
 async def domain_node(state: ChatState) -> ChatState:
-    _add_event(state, "agent_started", {"agent": "DomainAgent", "domain": state.get("domain")})
+    _add_event(
+        state,
+        "agent_started",
+        {
+            "agent": "DomainAgent",
+            "main_route": state.get("main_route", state.get("domain")),
+            "sub_route": state.get("sub_route"),
+        },
+    )
 
-    domain = state.get("domain", "generic")
+    main_route = state.get("main_route", state.get("domain", "generic"))
+    domain = state.get("domain", "generic") if main_route == "request" else main_route
     pending = state.get("pending_request")
     message = state.get("message", "")
 
@@ -88,13 +109,13 @@ async def domain_node(state: ChatState) -> ChatState:
     actions: list[dict[str, Any]] = []
 
     if domain == "hr":
-        response, pending, actions = await _handle_hr(message, pending, state)
+        response, pending, actions = await _handle_hr(message, pending, state, domain)
     elif domain == "ops":
-        response, pending, actions = await _handle_ops(message, pending, state)
+        response, pending, actions = await _handle_ops(message, pending, state, domain)
     elif domain == "it":
-        response, pending, actions = await _handle_it(message, pending, state)
+        response, pending, actions = await _handle_it(message, pending, state, domain)
     elif domain == "workspace":
-        response, pending, actions = await _handle_workspace(message, pending, state)
+        response, pending, actions = await _handle_workspace(message, pending, state, domain)
     elif domain == "doc_qa":
         response, pending, actions = await _handle_doc_qa(message, pending, state)
     else:
@@ -116,7 +137,7 @@ async def domain_node(state: ChatState) -> ChatState:
 
 
 async def _handle_hr(
-    message: str, pending: dict[str, Any] | None, state: ChatState
+    message: str, pending: dict[str, Any] | None, state: ChatState, domain: str
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") == RequestType.LEAVE:
         updates = await _extract_pending_updates(pending, message)
@@ -129,7 +150,7 @@ async def _handle_hr(
             return prompt, pending, [action]
         return _leave_success(pending), None, [action]
 
-    request_type, fields = await classify_request("hr", message)
+    request_type, fields = await _resolve_subroute_classification(state, domain, message)
     if request_type == RequestType.LEAVE:
         pending = build_pending_request("hr", RequestType.LEAVE, fields)
         if pending["missing"]:
@@ -144,7 +165,7 @@ async def _handle_hr(
 
 
 async def _handle_ops(
-    message: str, pending: dict[str, Any] | None, state: ChatState
+    message: str, pending: dict[str, Any] | None, state: ChatState, domain: str
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") in {RequestType.EXPENSE, RequestType.TRAVEL}:
         updates = await _extract_pending_updates(pending, message)
@@ -163,7 +184,7 @@ async def _handle_ops(
             return prompt, pending, [action]
         return _travel_success(pending), None, [action]
 
-    request_type, fields = await classify_request("ops", message)
+    request_type, fields = await _resolve_subroute_classification(state, domain, message)
     if request_type in {RequestType.EXPENSE, RequestType.TRAVEL}:
         pending = build_pending_request("ops", request_type, fields)
         if pending["missing"]:
@@ -184,7 +205,7 @@ async def _handle_ops(
 
 
 async def _handle_it(
-    message: str, pending: dict[str, Any] | None, state: ChatState
+    message: str, pending: dict[str, Any] | None, state: ChatState, domain: str
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") in {RequestType.ACCESS, RequestType.TICKET}:
         updates = await _extract_pending_updates(pending, message)
@@ -206,7 +227,7 @@ async def _handle_it(
             return prompt, pending, [action]
         return _ticket_success(pending), None, [action]
 
-    request_type, fields = await classify_request("it", message)
+    request_type, fields = await _resolve_subroute_classification(state, domain, message)
     if request_type in {RequestType.ACCESS, RequestType.TICKET}:
         pending = build_pending_request("it", request_type, fields)
         if pending["missing"]:
@@ -230,7 +251,7 @@ async def _handle_it(
 
 
 async def _handle_workspace(
-    message: str, pending: dict[str, Any] | None, state: ChatState
+    message: str, pending: dict[str, Any] | None, state: ChatState, domain: str
 ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     if pending and pending.get("type") == RequestType.WORKSPACE_BOOKING:
         updates = await _extract_pending_updates(pending, message)
@@ -256,7 +277,7 @@ async def _handle_workspace(
         _apply_booking_result_to_pending(pending, action)
         return _workspace_success(pending), None, [action]
 
-    request_type, fields = await classify_request("workspace", message)
+    request_type, fields = await _resolve_subroute_classification(state, domain, message)
     if request_type == RequestType.WORKSPACE_BOOKING:
         # Prefer LLM extraction over heuristics for workspace details.
         llm_fields = await extract_fields(RequestType.WORKSPACE_BOOKING, message)

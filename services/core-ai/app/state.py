@@ -6,6 +6,9 @@ class ChatState(TypedDict, total=False):
     tenant_id: str
     message: str
     user: dict[str, Any]
+    main_route: str
+    sub_route: str
+    sub_route_fields: dict[str, Any]
     domain: str
     doc_scope: str
     sensitivity: str

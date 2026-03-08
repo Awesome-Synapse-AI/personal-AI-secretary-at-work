@@ -87,3 +87,43 @@ def test_call_llm_json_repairs_non_json(monkeypatch):
 
     result = asyncio.run(llm_client.call_llm_json("sys", "user", max_tokens=16))
     assert result == {"foo": 1, "bar": "baz"}
+
+
+def test_call_llm_json_retries_when_truncated(monkeypatch):
+    calls = {"count": 0}
+
+    def responder(payload):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {
+                                "content": "",
+                                "reasoning": "I should return JSON with keys main_route and sensitivity",
+                            },
+                        }
+                    ]
+                }
+            )
+        return _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": '{"main_route":"doc_qa","sensitivity":"normal"}',
+                        },
+                    }
+                ]
+            }
+        )
+
+    fake_client = _FakeAsyncClient(responder)
+    monkeypatch.setattr(llm_client.httpx, "AsyncClient", lambda timeout: fake_client)
+
+    result = asyncio.run(llm_client.call_llm_json("sys", "user", max_tokens=64))
+    assert calls["count"] == 2
+    assert result == {"main_route": "doc_qa", "sensitivity": "normal"}
