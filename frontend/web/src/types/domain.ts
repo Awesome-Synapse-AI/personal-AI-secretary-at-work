@@ -47,6 +47,7 @@ export interface Ticket {
   type: string;
   category?: string | null;
   description: string;
+  incident_date?: string | null;
   location?: string | null;
   priority?: string | null;
   status: string;
@@ -61,6 +62,7 @@ export interface AccessRequest {
   resource: string;
   requested_role: string;
   justification: string;
+  needed_by_date?: string | null;
   status: string;
   approver_id?: string | null;
   reject_reason?: string | null;

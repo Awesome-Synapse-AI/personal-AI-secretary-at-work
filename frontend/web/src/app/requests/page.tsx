@@ -15,23 +15,29 @@ interface RequestState {
   bookings: Booking[];
 }
 
+type DetailRow = {
+  label: string;
+  value: string | null | undefined;
+};
+
 const initialState: RequestState = { leaves: [], expenses: [], travel: [], access: [], tickets: [], bookings: [] };
 
 export default function RequestsPage() {
   const [data, setData] = useState<RequestState>(initialState);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
 
   const load = async () => {
     setLoading(true);
     try {
       const [leaves, expenses, travel, access, tickets, bookings] = await Promise.all([
-        api.get<{ requests: LeaveRequest[] }>(`/domain/requests/me`).then((r) => r.requests),
-        api.get<{ expenses: Expense[] }>(`/domain/expenses/me`).then((r) => r.expenses),
-        api.get<{ travel_requests: TravelRequest[] }>(`/domain/travel-requests/me`).then((r) => r.travel_requests),
-        api.get<{ access_requests: AccessRequest[] }>(`/domain/access-requests/me`).then((r) => r.access_requests),
-        api.get<{ tickets: Ticket[] }>(`/domain/tickets/me`).then((r) => r.tickets),
-        api.get<{ bookings: Booking[] }>(`/domain/bookings/me`).then((r) => r.bookings),
+        api.get<{ requests: LeaveRequest[] }>(`/domain/requests/me`).then((r) => r.requests ?? []),
+        api.get<{ expenses: Expense[] }>(`/domain/expenses/me`).then((r) => r.expenses ?? []),
+        api.get<{ travel_requests: TravelRequest[] }>(`/domain/travel-requests/me`).then((r) => r.travel_requests ?? []),
+        api.get<{ access_requests: AccessRequest[] }>(`/domain/access-requests/me`).then((r) => r.access_requests ?? []),
+        api.get<{ tickets: Ticket[] }>(`/domain/tickets/me`).then((r) => r.tickets ?? []),
+        api.get<{ bookings: Booking[] }>(`/domain/bookings/me`).then((r) => r.bookings ?? []),
       ]);
       setData({ leaves, expenses, travel, access, tickets, bookings });
       setError(null);
@@ -53,16 +59,103 @@ export default function RequestsPage() {
 
   const cards = useMemo(
     () => [
-      { title: "Leave", items: data.leaves, fields: (l: LeaveRequest) => `${l.leave_type} ${l.start_date} -> ${l.end_date}`, status: (l: LeaveRequest) => l.status },
-      { title: "Expenses", items: data.expenses, fields: (e: Expense) => `${e.amount} ${e.currency} - ${e.category}`, status: (e: Expense) => e.status },
-      { title: "Travel", items: data.travel, fields: (t: TravelRequest) => `${t.origin} -> ${t.destination} on ${t.departure_date}`, status: (t: TravelRequest) => t.status },
-      { title: "Access", items: data.access, fields: (a: AccessRequest) => `${a.resource} - ${a.requested_role}`, status: (a: AccessRequest) => a.status },
-      { title: "Tickets", items: data.tickets, fields: (t: Ticket) => `${t.type} - ${t.description}`, status: (t: Ticket) => t.status },
+      {
+        title: "Leave",
+        items: data.leaves,
+        headline: (l: LeaveRequest) => `${l.leave_type} leave ${l.start_date} -> ${l.end_date}`,
+        details: (l: LeaveRequest): DetailRow[] => [
+          { label: "Request ID", value: String(l.id) },
+          { label: "Type", value: l.leave_type },
+          { label: "Start date", value: l.start_date },
+          { label: "End date", value: l.end_date },
+          { label: "Days", value: l.requested_days != null ? String(l.requested_days) : null },
+          { label: "Reason", value: l.reason ?? null },
+          { label: "Reject reason", value: l.reject_reason ?? null },
+          { label: "Created", value: formatDateTime(l.created_at) },
+          { label: "Updated", value: formatDateTime(l.updated_at) },
+        ],
+        status: (l: LeaveRequest) => l.status,
+      },
+      {
+        title: "Expenses",
+        items: data.expenses,
+        headline: (e: Expense) => `Amount: ${e.amount} ${e.currency} | Description: ${formatDetailValue(e.category)}`,
+        details: (e: Expense): DetailRow[] => [
+          { label: "Request ID", value: String(e.id) },
+          { label: "Amount", value: String(e.amount) },
+          { label: "Currency", value: e.currency },
+          { label: "Description", value: e.category },
+          { label: "Date", value: e.date },
+          { label: "Project", value: e.project_code ?? null },
+          { label: "Created", value: formatDateTime(e.created_at) },
+          { label: "Updated", value: formatDateTime(e.updated_at) },
+        ],
+        status: (e: Expense) => e.status,
+      },
+      {
+        title: "Travel",
+        items: data.travel,
+        headline: (t: TravelRequest) => `${t.origin} -> ${t.destination}`,
+        details: (t: TravelRequest): DetailRow[] => [
+          { label: "Request ID", value: String(t.id) },
+          { label: "Origin", value: t.origin },
+          { label: "Destination", value: t.destination },
+          { label: "Departure", value: t.departure_date },
+          { label: "Return", value: t.return_date ?? null },
+          { label: "Class", value: t.travel_class ?? null },
+          { label: "Created", value: formatDateTime(t.created_at) },
+          { label: "Updated", value: formatDateTime(t.updated_at) },
+        ],
+        status: (t: TravelRequest) => t.status,
+      },
+      {
+        title: "Access",
+        items: data.access,
+        headline: (a: AccessRequest) => `${a.resource} - ${a.requested_role}`,
+        details: (a: AccessRequest): DetailRow[] => [
+          { label: "Request ID", value: String(a.id) },
+          { label: "Resource", value: a.resource },
+          { label: "Requested role", value: a.requested_role },
+          { label: "Justification", value: a.justification },
+          { label: "Needed by", value: a.needed_by_date ?? null },
+          { label: "Reject reason", value: a.reject_reason ?? null },
+          { label: "Created", value: formatDateTime(a.created_at) },
+          { label: "Updated", value: formatDateTime(a.updated_at) },
+        ],
+        status: (a: AccessRequest) => a.status,
+      },
+      {
+        title: "Tickets",
+        items: data.tickets,
+        headline: (t: Ticket) => `${t.type} - ${t.description}`,
+        details: (t: Ticket): DetailRow[] => [
+          { label: "Request ID", value: String(t.id) },
+          { label: "Type", value: t.type },
+          { label: "Description", value: t.description },
+          { label: "Category", value: t.category ?? null },
+          { label: "Priority", value: t.priority ?? null },
+          { label: "Location", value: t.location ?? null },
+          { label: "Incident date", value: t.incident_date ?? null },
+          { label: "Assignee", value: t.assignee ?? null },
+          { label: "Created", value: formatDateTime(t.created_at) },
+          { label: "Updated", value: formatDateTime(t.updated_at) },
+        ],
+        status: (t: Ticket) => t.status,
+      },
       {
         title: "Workspace Bookings",
         items: data.bookings,
-        fields: (b: Booking) =>
-          `${b.resource_type} ${b.resource_name || b.resource_id} ${new Date(b.start_time).toLocaleString()} -> ${new Date(b.end_time).toLocaleString()}`,
+        headline: (b: Booking) =>
+          `${formatResourceType(b.resource_type)}: ${b.resource_name || "Unknown resource"}`,
+        details: (b: Booking): DetailRow[] => [
+          { label: "Request ID", value: String(b.id) },
+          { label: "Resource type", value: b.resource_type },
+          { label: "Resource", value: b.resource_name || "Unknown resource" },
+          { label: "Start", value: formatDateTime(b.start_time) },
+          { label: "End", value: formatDateTime(b.end_time) },
+          { label: "Created", value: formatDateTime(b.created_at) },
+          { label: "Updated", value: formatDateTime(b.updated_at) },
+        ],
         status: (b: Booking) => b.status,
       },
     ],
@@ -101,11 +194,24 @@ export default function RequestsPage() {
               ) : (
                 card.items.map((item: any) => (
                   <div key={item.id} className="rounded-xl border border-white/5 bg-white/5 p-3">
-                    <p className="text-sm font-semibold text-slate-100">{card.fields(item)}</p>
-                    <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
-                      <span>Status: {card.status(item)}</span>
-                      <StatusPill status={card.status(item)} />
+                    <p className="text-sm font-semibold text-slate-100">{card.headline(item)}</p>
+                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-slate-400">
+                      <div className="flex items-center gap-2">
+                        <span>Status: {card.status(item)}</span>
+                        <StatusPill status={card.status(item)} />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const key = `${card.title}:${item.id}`;
+                          setExpandedItems((prev) => ({ ...prev, [key]: !prev[key] }));
+                        }}
+                        className="btn-ghost px-2 py-1 text-xs"
+                      >
+                        {expandedItems[`${card.title}:${item.id}`] ? "Hide details" : "Show details"}
+                      </button>
                     </div>
+                    {expandedItems[`${card.title}:${item.id}`] ? <DetailGrid rows={card.details(item)} /> : null}
                   </div>
                 ))
               )}
@@ -115,6 +221,46 @@ export default function RequestsPage() {
       </div>
     </div>
   );
+}
+
+function formatDateTime(value?: string | null): string | null {
+  if (!value) return null;
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return value;
+  return dt.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  });
+}
+
+function DetailGrid({ rows }: { rows: DetailRow[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1 text-xs text-slate-300 md:grid-cols-2">
+      {rows.map((row) => (
+        <p key={`${row.label}-${row.value}`}>
+          <span className="text-slate-400">{row.label}:</span> {formatDetailValue(row.value)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function formatDetailValue(value: string | null | undefined): string {
+  if (value === null || value === undefined) return "N/A";
+  const cleaned = String(value).trim();
+  return cleaned.length > 0 ? cleaned : "N/A";
+}
+
+function formatResourceType(value: string): string {
+  if (!value) return "Resource";
+  return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
 }
 
 function StatusPill({ status }: { status: string }) {

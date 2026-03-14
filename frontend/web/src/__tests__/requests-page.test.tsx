@@ -22,6 +22,7 @@ function mockFetchSequence() {
     { travel_requests: [] },
     { access_requests: [] },
     { tickets: [] },
+    { bookings: [] },
   ];
   (global.fetch as jest.Mock) = jest.fn().mockImplementation(() => {
     const next = payloads.shift() ?? {};
@@ -47,7 +48,7 @@ describe("RequestsPage data fetching", () => {
   it("calls all domain endpoints once on load", async () => {
     render(<RequestsPage />);
 
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(6));
 
     const calledUrls = (fetch as jest.Mock).mock.calls.map((c: any[]) => c[0]);
     expect(calledUrls).toEqual(
@@ -57,6 +58,7 @@ describe("RequestsPage data fetching", () => {
         "http://localhost:8000/api/v1/domain/travel-requests/me",
         "http://localhost:8000/api/v1/domain/access-requests/me",
         "http://localhost:8000/api/v1/domain/tickets/me",
+        "http://localhost:8000/api/v1/domain/bookings/me",
       ])
     );
   });
