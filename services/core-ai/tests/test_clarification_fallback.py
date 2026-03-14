@@ -46,7 +46,8 @@ async def test_domain_ops_asks_follow_up_for_travel_when_classifier_llm_empty(mo
 
     assert result["pending_request"] is not None
     assert result["pending_request"]["type"] == RequestType.TRAVEL
-    assert "departing from" in result["response"].lower()
+    assert result["pending_request"]["filled"]["origin"] == "company"
+    assert "departure date" in result["response"].lower()
 
 
 @pytest.mark.asyncio
@@ -135,8 +136,44 @@ async def test_extract_fields_accepts_string_request_type(monkeypatch):
         return {"request_type": "travel", "fields": {"origin": "BKK"}}
 
     monkeypatch.setattr("app.agents.clarification.call_llm_json", fake_call_llm_json)
-    updates = await extract_fields("travel", "from bangkok")
+    updates = await extract_fields("travel", "from BKK")
     assert updates["origin"] == "BKK"
+
+
+@pytest.mark.asyncio
+async def test_classify_request_travel_infers_same_day_and_times_from_single_sentence(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_call_llm_json(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"request_type": "travel", "fields": {}}
+        return {
+            "request_type": "travel",
+            "fields": {
+                "origin": None,
+                "destination": "customer company",
+                "departure_date": "2026-05-18",
+                "return_date": "2026-05-18",
+                "preferred_departure_time": "7:00 a.m.",
+                "preferred_return_time": "5:00 p.m.",
+                "class": None,
+            },
+        }
+
+    monkeypatch.setattr("app.agents.clarification.call_llm_json", fake_call_llm_json)
+    request_type, fields = await classify_request(
+        "ops",
+        "I want to reserve a car to travel to customer company whole day on 18/May/2026 starting from 7:00 a.m. to 5:00 p.m.",
+    )
+
+    assert request_type == RequestType.TRAVEL
+    assert fields["origin"] == "company"
+    assert fields["destination"] == "customer company"
+    assert fields["departure_date"] == "2026-05-18"
+    assert fields["return_date"] == "2026-05-18"
+    assert fields["preferred_departure_time"].lower().startswith("7:00")
+    assert fields["preferred_return_time"].lower().startswith("5:00")
 
 
 @pytest.mark.asyncio
@@ -222,7 +259,10 @@ async def test_travel_pending_parses_multiple_fields_from_single_message(monkeyp
     monkeypatch.setattr(domain_agent, "_call_tool", fake_call_tool)
 
     state = ChatState(
-        message="Please book travel from Dubai to Bangkok on 10 Jul 2026 and return on 15 Jul 2026 in economy class",
+        message=(
+            "Please book travel from Dubai to Bangkok on 10 Jul 2026 at 9:00 AM "
+            "and return on 15 Jul 2026 at 7:00 PM in economy class"
+        ),
         domain="ops",
         pending_request={
             "domain": "ops",
@@ -243,6 +283,47 @@ async def test_travel_pending_parses_multiple_fields_from_single_message(monkeyp
     assert captured["payload"]["departure_date"] == "2026-07-10"
     assert captured["payload"]["return_date"] == "2026-07-15"
     assert captured["payload"]["travel_class"] == "economy"
+    assert captured["payload"]["preferred_departure_time"] == "9:00 AM"
+    assert captured["payload"]["preferred_return_time"] == "7:00 PM"
+
+
+@pytest.mark.asyncio
+async def test_travel_pending_whole_day_sentence_submits_without_extra_questions(monkeypatch):
+    captured = {}
+
+    async def fake_extract_fields(*args, **kwargs):
+        return {}
+
+    async def fake_call_tool(state, service, path, payload, action_type):
+        captured["payload"] = payload
+        return {"type": action_type, "status": "submitted", "result": {"status": "submitted"}}
+
+    monkeypatch.setattr(domain_agent, "extract_fields", fake_extract_fields)
+    monkeypatch.setattr(domain_agent, "_call_tool", fake_call_tool)
+
+    state = ChatState(
+        message="I want to reserve a car to travel to customer company whole day on 18/May/2026 starting from 7:00 a.m. to 5:00 p.m.",
+        domain="ops",
+        pending_request={
+            "domain": "ops",
+            "type": RequestType.TRAVEL,
+            "filled": {},
+            "missing": ["origin", "destination", "departure_date", "return_date"],
+            "step": "collecting_details",
+        },
+        actions=[],
+        events=[],
+    )
+
+    result = await domain_agent.domain_node(state)
+
+    assert result["pending_request"] is None
+    assert captured["payload"]["origin"] == "company"
+    assert captured["payload"]["destination"] == "customer company"
+    assert captured["payload"]["departure_date"] == "2026-05-18"
+    assert captured["payload"]["return_date"] == "2026-05-18"
+    assert captured["payload"]["preferred_departure_time"].lower().startswith("7:00")
+    assert captured["payload"]["preferred_return_time"].lower().startswith("5:00")
 
 
 @pytest.mark.asyncio
@@ -431,6 +512,16 @@ def test_classification_prompt_ops_contains_travel_vs_expense_disambiguation():
     assert "request_type\":\"travel" in prompt
     assert "please reimburse taxi 1200 thb" in prompt
     assert "request_type\":\"expense" in prompt
+
+
+def test_build_pending_travel_defaults_origin_to_company():
+    pending = build_pending_request(
+        "ops",
+        RequestType.TRAVEL,
+        {"destination": "Bangkok", "departure_date": "2026-03-12", "return_date": "2026-03-12"},
+    )
+    assert pending["filled"]["origin"] == "company"
+    assert "origin" not in pending["missing"]
 
 
 def test_build_pending_request_marks_invalid_currency_missing():

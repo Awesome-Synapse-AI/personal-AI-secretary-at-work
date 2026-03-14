@@ -119,6 +119,12 @@ ALTER TABLE IF EXISTS ticket
 ALTER TABLE IF EXISTS accessrequest
   ADD COLUMN IF NOT EXISTS needed_by_date DATE;
 
+ALTER TABLE IF EXISTS travelrequest
+  ADD COLUMN IF NOT EXISTS preferred_departure_time TEXT;
+
+ALTER TABLE IF EXISTS travelrequest
+  ADD COLUMN IF NOT EXISTS preferred_return_time TEXT;
+
 CREATE TABLE IF NOT EXISTS auditlog (
   id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   actor_id        TEXT NOT NULL,

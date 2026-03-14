@@ -38,6 +38,8 @@ QUESTION_MAP = {
     "destination": "What is the destination city or airport?",
     "departure_date": "What is the departure date? Please use DD/MM/YYYY.",
     "return_date": "What is the return date? Please use DD/MM/YYYY.",
+    "preferred_departure_time": "What time do you want to depart? (e.g., 9:00 AM)",
+    "preferred_return_time": "What time do you want to return? (e.g., 7:00 PM)",
     "subtype": "Is this an IT issue or a facilities issue?",
     "description": "Can you describe the issue in a sentence?",
     "location": "Which room or area is this in?",
@@ -61,7 +63,15 @@ REQUEST_TYPES_BY_DOMAIN = {
 FIELD_SETS = {
     RequestType.LEAVE: ["leave_type", "start_date", "end_date", "reason"],
     RequestType.EXPENSE: ["amount", "currency", "date", "category", "project_code"],
-    RequestType.TRAVEL: ["origin", "destination", "departure_date", "return_date", "class"],
+    RequestType.TRAVEL: [
+        "origin",
+        "destination",
+        "departure_date",
+        "return_date",
+        "preferred_departure_time",
+        "preferred_return_time",
+        "class",
+    ],
     RequestType.ACCESS: ["resource", "requested_role", "justification", "needed_by_date"],
     RequestType.TICKET: ["subtype", "description", "location", "entity", "incident_date"],
     RequestType.WORKSPACE_BOOKING: [
@@ -78,7 +88,7 @@ FIELD_SETS = {
 FIELD_DESCRIPTIONS = {
     RequestType.LEAVE: "leave_type, start_date (DD/MM/YYYY), end_date (DD/MM/YYYY), reason",
     RequestType.EXPENSE: "amount (number), currency (ISO 4217), date (DD/MM/YYYY), category, project_code",
-    RequestType.TRAVEL: "origin, destination, departure_date (DD/MM/YYYY), return_date (DD/MM/YYYY), class",
+    RequestType.TRAVEL: "origin, destination, departure_date (DD/MM/YYYY), return_date (DD/MM/YYYY), preferred_departure_time, preferred_return_time, class",
     RequestType.ACCESS: "resource, requested_role (read/write/admin), justification, needed_by_date (DD/MM/YYYY)",
     RequestType.TICKET: "subtype (it or facilities), description, location, entity (asset like printer/laptop/software/network), incident_date (DD/MM/YYYY)",
     RequestType.WORKSPACE_BOOKING: "resource_type (room/desk/equipment/parking), resource_name, start_time (include date if present), end_time (include date if present), location, description",
@@ -146,6 +156,8 @@ async def classify_request(domain: str, message: str) -> tuple[RequestType | Non
         print(f"Clarify classify_request invalid type {request_type} for domain {domain}", flush=True)
         return _heuristic_classify_request(domain, message)
     fields = _filter_fields_by_evidence(request_type_enum, payload.get("fields", {}), message)
+    if request_type_enum == RequestType.TRAVEL:
+        fields = await _extract_travel_fields_with_retry(message, fields)
     logger.info("Clarify classify_request payload: %s", payload)
     print(f"Clarify classify_request payload: {payload}", flush=True)
     return request_type_enum, _normalize_fields(request_type_enum, fields)
@@ -172,6 +184,8 @@ async def extract_fields(request_type: RequestType | str, message: str) -> dict[
             print(f"Clarify extract_fields mismatched type {declared} expected {req_enum}", flush=True)
             return {}
     fields = _filter_fields_by_evidence(req_enum, payload.get("fields", {}), message)
+    if req_enum == RequestType.TRAVEL:
+        fields = await _extract_travel_fields_with_retry(message, fields)
     logger.info("Clarify extract_fields payload: %s", payload)
     print(f"Clarify extract_fields payload: {payload}", flush=True)
     return _normalize_fields(req_enum, fields)
@@ -268,13 +282,14 @@ def _extraction_guidance(request_type: RequestType) -> str:
     if request_type == RequestType.TRAVEL:
         return (
             "Rules: origin and destination must be cities/airports; use departure_date and return_date when a range is given. "
+            "Capture preferred_departure_time and preferred_return_time when a time is mentioned. "
             "Examples:\n"
             'Input: "Book travel from NYC to LAX Mar 1-5"\n'
-            'Output: {"request_type":"travel","fields":{"origin":"NYC","destination":"LAX","departure_date":"2026-03-01","return_date":"2026-03-05","class":null}}\n'
+            'Output: {"request_type":"travel","fields":{"origin":"NYC","destination":"LAX","departure_date":"2026-03-01","return_date":"2026-03-05","preferred_departure_time":null,"preferred_return_time":null,"class":null}}\n'
             'Input: "Flight Bangkok to Tokyo on 2026-03-20 return 2026-03-25, business class"\n'
-            'Output: {"request_type":"travel","fields":{"origin":"Bangkok","destination":"Tokyo","departure_date":"2026-03-20","return_date":"2026-03-25","class":"business"}}\n'
-            'Input: "Travel to Singapore from Kuala Lumpur on 2026-04-01"\n'
-            'Output: {"request_type":"travel","fields":{"origin":"Kuala Lumpur","destination":"Singapore","departure_date":"2026-04-01","return_date":null,"class":null}}'
+            'Output: {"request_type":"travel","fields":{"origin":"Bangkok","destination":"Tokyo","departure_date":"2026-03-20","return_date":"2026-03-25","preferred_departure_time":null,"preferred_return_time":null,"class":"business"}}\n'
+            'Input: "Travel to Singapore from Kuala Lumpur on 2026-04-01 leave at 9:00 AM return 7:00 PM"\n'
+            'Output: {"request_type":"travel","fields":{"origin":"Kuala Lumpur","destination":"Singapore","departure_date":"2026-04-01","return_date":"2026-04-01","preferred_departure_time":"9:00 AM","preferred_return_time":"7:00 PM","class":null}}'
         )
     if request_type == RequestType.ACCESS:
         return (
@@ -349,6 +364,8 @@ def _normalize_fields(request_type: RequestType | str, fields: dict[str, Any] | 
             if key in {"resource_name", "start_time", "end_time"} and isinstance(value, str):
                 if not _looks_like_workspace_value(key, value):
                     value = None
+        if req_enum == RequestType.TRAVEL and key == "origin" and value is None:
+            value = "company"
         normalized[key] = value
     return normalized
 
@@ -434,7 +451,11 @@ def _filter_fields_by_evidence(
         if cleaned.get("reason") and not _has_substring(cleaned.get("reason")):
             cleaned["reason"] = None
     elif req_enum == RequestType.TRAVEL:
-        if cleaned.get("origin") and not _has_substring(cleaned.get("origin")):
+        if (
+            cleaned.get("origin")
+            and str(cleaned.get("origin")).strip().lower() != "company"
+            and not _has_substring(cleaned.get("origin"))
+        ):
             cleaned["origin"] = None
         if cleaned.get("destination") and not _has_substring(cleaned.get("destination")):
             cleaned["destination"] = None
@@ -586,13 +607,54 @@ def _to_iso_date(value: Any) -> str | None:
     """
     if not isinstance(value, str):
         return None
+    text = value.strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
     try:
-        dt = dateparser.parse(value, dayfirst=True, yearfirst=False, fuzzy=True)
+        dt = dateparser.parse(text, dayfirst=True, yearfirst=False, fuzzy=True)
     except Exception:
         return None
     if not dt:
         return None
     return dt.date().isoformat()
+
+
+def _travel_retry_prompt() -> str:
+    return (
+        "You extract travel request fields with high precision. "
+        "Return only JSON: {\"request_type\":\"travel\",\"fields\":{...}}. "
+        "Do not include any extra text. "
+        "Fields must be: origin, destination, departure_date, return_date, preferred_departure_time, preferred_return_time, class. "
+        "Rules: "
+        "1) If user says whole day or same day with one date, set departure_date and return_date to that same date. "
+        "2) Parse 'starting from X to Y' as preferred_departure_time=X and preferred_return_time=Y. "
+        "3) If origin is not provided, set origin to null (downstream default will be applied). "
+        "4) Destination should be a place only (e.g., 'customer company', not 'travel to customer company whole day'). "
+        "5) Use ISO dates YYYY-MM-DD for departure_date/return_date. "
+        "Examples:\n"
+        "Input: I want to reserve a car to travel to customer company whole day on 18/May/2026 starting from 7:00 a.m. to 5:00 p.m.\n"
+        "Output: {\"request_type\":\"travel\",\"fields\":{\"origin\":null,\"destination\":\"customer company\",\"departure_date\":\"2026-05-18\",\"return_date\":\"2026-05-18\",\"preferred_departure_time\":\"7:00 a.m.\",\"preferred_return_time\":\"5:00 p.m.\",\"class\":null}}\n"
+        "Input: Book travel from Dubai to Bangkok on 10 Jul 2026 at 9:00 AM and return on 15 Jul 2026 at 7:00 PM in economy class\n"
+        "Output: {\"request_type\":\"travel\",\"fields\":{\"origin\":\"Dubai\",\"destination\":\"Bangkok\",\"departure_date\":\"2026-07-10\",\"return_date\":\"2026-07-15\",\"preferred_departure_time\":\"9:00 AM\",\"preferred_return_time\":\"7:00 PM\",\"class\":\"economy\"}}"
+    )
+
+
+async def _extract_travel_fields_with_retry(message: str, seed_fields: dict[str, Any] | None = None) -> dict[str, Any]:
+    merged = dict(seed_fields or {})
+    required = ("destination", "departure_date", "return_date")
+    if all(merged.get(key) is not None for key in required):
+        return merged
+
+    payload = await call_llm_json(_travel_retry_prompt(), message, max_tokens=384)
+    if not isinstance(payload, dict):
+        return merged
+    declared = payload.get("request_type")
+    if declared and declared != RequestType.TRAVEL.value:
+        return merged
+    retry_fields = _filter_fields_by_evidence(RequestType.TRAVEL, payload.get("fields", {}), message)
+    return _merge_fields(merged, retry_fields)
 
 
 def _heuristic_classify_request(domain: str, message: str) -> tuple[RequestType | None, dict[str, Any]]:
@@ -724,4 +786,3 @@ def _normalize_resource_type(value: Any) -> str | None:
         if v in text:
             return v
     return None
-

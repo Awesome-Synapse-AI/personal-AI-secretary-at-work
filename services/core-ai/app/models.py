@@ -70,6 +70,8 @@ class TravelRequest(SQLModel, table=True):
     departure_date: date
     return_date: Optional[date] = None
     travel_class: Optional[str] = None
+    preferred_departure_time: Optional[str] = None
+    preferred_return_time: Optional[str] = None
     status: str = "submitted"
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

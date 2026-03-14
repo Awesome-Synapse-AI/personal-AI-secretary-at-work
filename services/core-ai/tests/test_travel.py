@@ -26,6 +26,22 @@ def test_create_travel_and_conflict_on_submit(client):
     assert conflict.status_code == 409
 
 
+def test_create_travel_stores_preferred_times(client):
+    payload = {
+        "origin": "NYC",
+        "destination": "LAX",
+        "departure_date": "2026-04-20",
+        "return_date": "2026-04-20",
+        "preferred_departure_time": "09:00",
+        "preferred_return_time": "19:00",
+    }
+    resp = client.post(f"{settings.api_prefix}/domain/travel-requests", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()["travel"]
+    assert body["preferred_departure_time"] == "09:00"
+    assert body["preferred_return_time"] == "19:00"
+
+
 def test_travel_validation_errors(client):
     # return date before departure
     bad_return = client.post(

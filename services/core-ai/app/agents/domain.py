@@ -554,6 +554,8 @@ async def _submit_travel_request(pending: dict[str, Any], state: ChatState) -> d
         "departure_date": _to_iso_date(pending["filled"].get("departure_date")),
         "return_date": _to_iso_date(pending["filled"].get("return_date")),
         "travel_class": pending["filled"].get("class"),
+        "preferred_departure_time": pending["filled"].get("preferred_departure_time"),
+        "preferred_return_time": pending["filled"].get("preferred_return_time"),
     }
     return await _call_tool(state, "expense", "/travel-requests", payload, "travel_request")
 
@@ -872,8 +874,13 @@ def _to_iso_date(value: object) -> str | None:
     if not value:
         return None
     if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return text
         try:
-            dt = dateparser.parse(value, dayfirst=True, yearfirst=False, fuzzy=True)
+            dt = dateparser.parse(text, dayfirst=True, yearfirst=False, fuzzy=True)
         except Exception:
             return value  # leave as-is; backend will raise a clear error
         if dt:
@@ -923,6 +930,12 @@ def _coerce_answer_for_field(field: str, message: str) -> Any:
     if field in {"start_time", "end_time", "description", "location", "resource", "resource_name", "entity"}:
         return text
     if field in {"origin", "destination", "leave_type", "category", "project_code", "reason", "justification"}:
+        if field in {"origin", "destination"}:
+            lower = text.lower()
+            if len(text) > 60:
+                return None
+            if len(text.split()) > 5 and any(token in lower for token in (" on ", " starting ", " return ", " whole day ")):
+                return None
         if field == "category":
             inferred = _infer_expense_category(text)
             if inferred:
@@ -1031,7 +1044,7 @@ def _infer_expense_fields(text: str) -> dict[str, Any]:
 def _infer_travel_fields(text: str) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     route = re.search(
-        r"\bfrom\s+([A-Za-z][A-Za-z\s\-]{1,40}?)\s+to\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|[,.])",
+        r"\bfrom\s+([A-Za-z][A-Za-z\s\-]{1,40}?)\s+to\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|\s+starting|\s+whole day|[,.])",
         text,
         flags=re.IGNORECASE,
     )
@@ -1039,18 +1052,32 @@ def _infer_travel_fields(text: str) -> dict[str, Any]:
         fields["origin"] = route.group(1).strip()
         fields["destination"] = route.group(2).strip()
     else:
-        to_match = re.search(r"\bto\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|[,.])", text, flags=re.IGNORECASE)
-        from_match = re.search(r"\bfrom\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|[,.])", text, flags=re.IGNORECASE)
+        to_match = re.search(
+            r"\bto\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|\s+starting|\s+whole day|[,.])",
+            text,
+            flags=re.IGNORECASE,
+        )
+        from_match = re.search(
+            r"\bfrom\s+([A-Za-z][A-Za-z\s\-]{1,40}?)(?=$|\s+on|\s+depart|\s+return|\s+starting|[,.])",
+            text,
+            flags=re.IGNORECASE,
+        )
         if from_match:
             fields["origin"] = from_match.group(1).strip()
         if to_match:
-            fields["destination"] = to_match.group(1).strip()
+            candidate = to_match.group(1).strip()
+            if candidate.lower().startswith("travel to "):
+                candidate = candidate[10:].strip()
+            candidate = re.sub(r"\b(whole day|for whole day)\b.*$", "", candidate, flags=re.IGNORECASE).strip()
+            fields["destination"] = candidate
 
     dates = _extract_iso_dates_from_text(text)
     if len(dates) >= 1:
         fields["departure_date"] = dates[0]
     if len(dates) >= 2:
         fields["return_date"] = dates[1]
+    elif len(dates) == 1 and any(token in text.lower() for token in ("whole day", "same day", "return same day")):
+        fields["return_date"] = dates[0]
 
     low = text.lower()
     if "business class" in low:
@@ -1059,6 +1086,29 @@ def _infer_travel_fields(text: str) -> dict[str, Any]:
         fields["class"] = "economy"
     elif "first class" in low:
         fields["class"] = "first"
+
+    time_pattern = r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)\.?"
+    ret_match = re.search(
+        rf"(?:return|back|come back|arrive)\D{{0,24}}({time_pattern})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    dep_match = re.search(
+        rf"(?:depart|departure|leave|start)\D{{0,24}}({time_pattern})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    all_times = re.findall(time_pattern, text, flags=re.IGNORECASE)
+
+    if dep_match:
+        fields["preferred_departure_time"] = dep_match.group(1).strip()
+    elif all_times:
+        fields["preferred_departure_time"] = all_times[0].strip()
+
+    if ret_match:
+        fields["preferred_return_time"] = ret_match.group(1).strip()
+    elif len(all_times) >= 2:
+        fields["preferred_return_time"] = all_times[1].strip()
     return fields
 
 

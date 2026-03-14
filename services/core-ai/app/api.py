@@ -950,6 +950,8 @@ async def create_travel(
         departure_date=date.fromisoformat(travel.departure_date),
         return_date=date.fromisoformat(travel.return_date) if travel.return_date else None,
         travel_class=travel.travel_class,
+        preferred_departure_time=travel.preferred_departure_time,
+        preferred_return_time=travel.preferred_return_time,
         status="submitted",
     )
     session.add(data)
