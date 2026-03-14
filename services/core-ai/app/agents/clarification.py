@@ -197,7 +197,7 @@ def next_question(pending: dict[str, Any]) -> str:
 def _classification_prompt(domain: str, allowed: list[RequestType]) -> str:
     details = "; ".join(f"{name.value}: {FIELD_DESCRIPTIONS[name]}" for name in allowed)
     allowed_values = ", ".join([a.value for a in allowed])
-    return (
+    prompt = (
         "You classify employee requests and extract fields. "
         "Return only a single JSON object with keys request_type and fields. "
         "Do not include reasoning, code fences, or extra text. "
@@ -209,6 +209,22 @@ def _classification_prompt(domain: str, allowed: list[RequestType]) -> str:
         "projector/monitor/laptop/whiteboard -> equipment; parking spot/parking space/garage -> parking. "
         "Use null for unknown values."
     )
+    if domain == "ops":
+        prompt += (
+            " Ops disambiguation rules: "
+            "choose travel when the user asks to plan/arrange/book transportation or a trip "
+            "(including reserve car/taxi for customer/client visit). "
+            "choose expense only when the user asks to reimburse/log an already incurred cost "
+            "with spend details like amount/currency/receipt. "
+            "Examples:\n"
+            'Input: "I want to reserve a car to travel to customer company whole day on 12/Mar/2026. I will return back the same day at 7:00 p.m."\n'
+            'Output: {"request_type":"travel","fields":{"origin":null,"destination":"customer company","departure_date":"2026-03-12","return_date":"2026-03-12","class":null}}\n'
+            'Input: "Arrange transport for client site visit tomorrow and return by 7pm"\n'
+            'Output: {"request_type":"travel","fields":{"origin":null,"destination":"client site","departure_date":"2026-03-15","return_date":"2026-03-15","class":null}}\n'
+            'Input: "Please reimburse taxi 1200 THB from 12/03/2026"\n'
+            'Output: {"request_type":"expense","fields":{"amount":1200,"currency":"THB","date":"2026-03-12","category":"taxi","project_code":null}}'
+        )
+    return prompt
 
 
 def _extraction_prompt(request_type: RequestType) -> str:
@@ -588,7 +604,18 @@ def _heuristic_classify_request(domain: str, message: str) -> tuple[RequestType 
     lower = (message or "").lower()
 
     if domain == "ops":
-        travel_words = ("travel", "trip", "flight", "hotel", "book travel", "itinerary")
+        travel_words = (
+            "travel",
+            "trip",
+            "flight",
+            "hotel",
+            "book travel",
+            "itinerary",
+            "customer company",
+            "client site",
+            "return back",
+            "whole day",
+        )
         expense_words = ("expense", "receipt", "reimburse", "taxi", "meal", "hotel bill")
         if any(word in lower for word in travel_words):
             return RequestType.TRAVEL, {}
@@ -697,3 +724,4 @@ def _normalize_resource_type(value: Any) -> str | None:
         if v in text:
             return v
     return None
+

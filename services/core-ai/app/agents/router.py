@@ -43,9 +43,13 @@ REQUEST_DOMAIN_PROMPT = (
     "Return only a single JSON object with key request_domain. "
     "request_domain must be one of: workspace, hr, ops, it. "
     "Do not include reasoning, code fences, or any other text. "
+    "Disambiguation: travel/transport requests for client visits or trips belong to ops, "
+    "while workspace is only for office resource booking (room/desk/equipment/parking). "
     "Examples:\n"
     "Input: I need sick leave tomorrow -> {\"request_domain\":\"hr\"}\n"
     "Input: Reimburse $45 taxi from yesterday -> {\"request_domain\":\"ops\"}\n"
+    "Input: I want to reserve a car to travel to customer company tomorrow -> {\"request_domain\":\"ops\"}\n"
+    "Input: Arrange transport for client site visit and return by 7pm -> {\"request_domain\":\"ops\"}\n"
     "Input: VPN keeps dropping -> {\"request_domain\":\"it\"}\n"
     "Input: Reserve room A for 3pm -> {\"request_domain\":\"workspace\"}\n"
 )

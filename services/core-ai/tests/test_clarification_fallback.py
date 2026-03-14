@@ -1,7 +1,14 @@
 import pytest
 
 from app.agents import domain as domain_agent
-from app.agents.clarification import RequestType, classify_request, extract_fields, build_pending_request, next_question
+from app.agents.clarification import (
+    RequestType,
+    _classification_prompt,
+    build_pending_request,
+    classify_request,
+    extract_fields,
+    next_question,
+)
 from app.state import ChatState
 
 
@@ -415,6 +422,15 @@ async def test_classify_request_normalizes_expense_currency_and_amount(monkeypat
     assert fields["amount"] == 2000.0
     assert fields["currency"] == "THB"
     assert fields["date"] == "2025-06-23"
+
+
+def test_classification_prompt_ops_contains_travel_vs_expense_disambiguation():
+    prompt = _classification_prompt("ops", [RequestType.EXPENSE, RequestType.TRAVEL]).lower()
+    assert "ops disambiguation rules" in prompt
+    assert "reserve a car to travel to customer company" in prompt
+    assert "request_type\":\"travel" in prompt
+    assert "please reimburse taxi 1200 thb" in prompt
+    assert "request_type\":\"expense" in prompt
 
 
 def test_build_pending_request_marks_invalid_currency_missing():
