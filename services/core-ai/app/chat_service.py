@@ -7,6 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.agents.langgraph_flow import graph
 from app.config import settings
+from app.llm_client import call_llm_text
 from app.memory.session_store import SessionStore
 from app.schemas.chat import UserContext
 from app.state import ChatState
@@ -94,10 +95,14 @@ async def _persist_chat_to_mongo(
     messages = mongo_db[settings.mongo_chat_message_collection]
     now = utcnow()
 
-    default_title = _default_title(user_message)
+    existing = await sessions.find_one({"_id": session_id, "tenant_id": tenant_id}, {"_id": 1, "title": 1})
+    default_title = await _generate_session_title(user_message) if not existing else None
     await sessions.update_one(
         {"_id": session_id, "tenant_id": tenant_id},
-        {"$setOnInsert": {"created_at": now, "title": default_title}, "$set": {"updated_at": now}},
+        {
+            "$setOnInsert": {"created_at": now, "title": default_title or "New chat"},
+            "$set": {"updated_at": now},
+        },
         upsert=True,
     )
 
@@ -130,10 +135,70 @@ async def _persist_chat_to_mongo(
 
 
 def _default_title(text: str) -> str:
+    return _fallback_title(text)
+
+
+async def _generate_session_title(text: str) -> str:
+    fallback = _fallback_title(text)
+    if not text or not text.strip():
+        return fallback
+    prompt = (
+        "Create a short, human-readable chat session title. "
+        "It must summarize the user's intent. "
+        "Rules: 5-10 words, title case, no quotes, no trailing punctuation. "
+        "Do not copy the full sentence. "
+        "Examples:\n"
+        "Input: I want to reserve a car to travel to customer company whole day on 18/May/2026\n"
+        "Output: Customer Visit Car Booking\n"
+        "Input: Please reimburse taxi 1200 THB from 12/03/2026\n"
+        "Output: Taxi Reimbursement Request\n"
+        "Input: VPN keeps dropping on my laptop\n"
+        "Output: VPN Connectivity Issue"
+    )
+    try:
+        raw = await call_llm_text(prompt, text.strip(), max_tokens=24)
+    except Exception:
+        return fallback
+    if not raw:
+        return fallback
+    return _normalize_session_title(raw, fallback)
+
+
+def _fallback_title(text: str) -> str:
     if not text:
         return "New chat"
     first_line = text.strip().splitlines()[0]
-    trimmed = first_line[:60].rstrip()
-    if len(first_line) > 60:
-        trimmed = f"{trimmed}..."
-    return trimmed or "New chat"
+    # Keep fallback concise and readable, not raw full input.
+    tokens = [t for t in first_line.replace("\n", " ").split(" ") if t]
+    short = " ".join(tokens[:8]).strip()
+    if not short:
+        return "New chat"
+    return short[:80]
+
+
+def _normalize_session_title(raw_title: str | None, fallback: str) -> str:
+    title = " ".join((raw_title or "").strip().split())
+    title = title.strip("\"'` \t\r\n")
+    title = title.rstrip(".!?;:")
+    if not title:
+        title = fallback
+
+    words = [w for w in title.split(" ") if w]
+    if len(words) > 10:
+        words = words[:10]
+    if len(words) < 5:
+        fb_words = [w for w in fallback.split(" ") if w]
+        for w in fb_words:
+            if len(words) >= 5:
+                break
+            words.append(w)
+    if len(words) < 5:
+        for w in ["Request", "Summary", "Chat", "Session", "Title"]:
+            if len(words) >= 5:
+                break
+            words.append(w)
+
+    normalized = " ".join(words).strip()
+    if not normalized:
+        normalized = fallback
+    return normalized[:80]

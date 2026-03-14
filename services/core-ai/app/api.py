@@ -27,6 +27,7 @@ from app.audit import record_audit_log
 from app.chat_service import handle_chat
 from app.db import get_session
 from app.config import settings
+from app.llm_client import call_llm_text
 from app.models import (
     AccessRequest as AccessRequestModel,
     LeaveEntitlement,
@@ -66,6 +67,7 @@ from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
     ChatSessionMeta,
+    ChatSessionRenameRequest,
     ChatSessionMessagesResponse,
     ChatMessagePayload,
     UserContext,
@@ -128,6 +130,51 @@ def _derive_session_title(messages: list[dict]) -> str:
             content = first.get("content")
         return _trim(content)
     return "New chat"
+
+
+async def _summarize_session_title(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "New chat"
+    prompt = (
+        "Create a short, human-readable chat session title that summarizes the user's intent. "
+        "Rules: 5-10 words, title case, no quotes, no trailing punctuation. "
+        "Do not copy the full sentence.\n"
+        "Input: I want to reserve a car to travel to customer company whole day on 18/May/2026\n"
+        "Output: Customer Visit Car Booking"
+    )
+    try:
+        title = await call_llm_text(prompt, raw, max_tokens=24)
+    except Exception:
+        title = None
+    fallback = _derive_session_title([{"role": "user", "content": raw}])
+    return _normalize_session_title(cleaned=(title or ""), fallback=fallback)
+
+
+def _normalize_session_title(cleaned: str, fallback: str) -> str:
+    title = " ".join(cleaned.split()).strip("\"'` \t\r\n").rstrip(".!?;:")
+    if not title:
+        title = fallback
+
+    words = [w for w in title.split(" ") if w]
+    if len(words) > 10:
+        words = words[:10]
+    if len(words) < 5:
+        fb_words = [w for w in fallback.split(" ") if w]
+        for w in fb_words:
+            if len(words) >= 5:
+                break
+            words.append(w)
+    if len(words) < 5:
+        for w in ["Request", "Summary", "Chat", "Session", "Title"]:
+            if len(words) >= 5:
+                break
+            words.append(w)
+
+    normalized = " ".join(words).strip()
+    if not normalized:
+        normalized = fallback or "New chat"
+    return normalized[:80]
 
 
 def _get_entitlement(session: Session, user_id: str, year: int, leave_type: str, month: int | None = None) -> LeaveEntitlement | None:
@@ -1712,12 +1759,63 @@ async def generate_chat_title(
     )
     messages = [async_doc async for async_doc in cursor]
 
-    title = _derive_session_title(messages)
+    first_user_content = ""
+    for msg in messages:
+        if msg.get("role") == "user" and msg.get("content"):
+            first_user_content = str(msg.get("content"))
+            break
+    source_text = first_user_content or _derive_session_title(messages)
+    title = await _summarize_session_title(source_text)
     await mongo_db[settings.mongo_chat_session_collection].update_one(
         {"_id": session_id, "tenant_id": tenant},
         {"$set": {"title": title, "updated_at": utcnow()}},
     )
     return {"id": session_id, "title": title or "New chat"}
+
+
+@router.patch("/chat/sessions/{session_id}")
+async def rename_chat_session(
+    session_id: str,
+    payload: ChatSessionRenameRequest,
+    tenant_id: str | None = Header(default=None, convert_underscores=False, alias="X-Tenant-Id"),
+    request: Request = None,
+) -> dict[str, str]:
+    tenant = _tenant_from_header(tenant_id)
+    mongo_db: AsyncIOMotorDatabase = request.app.state.mongo_db
+    title = (payload.title or "").strip()
+    if not title:
+        raise HTTPException(400, "title is required")
+    if len(title) > 120:
+        raise HTTPException(400, "title must be <= 120 characters")
+
+    result = await mongo_db[settings.mongo_chat_session_collection].update_one(
+        {"_id": session_id, "tenant_id": tenant},
+        {"$set": {"title": title, "updated_at": utcnow()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"id": session_id, "title": title}
+
+
+@router.delete("/chat/sessions/{session_id}")
+async def delete_chat_session(
+    session_id: str,
+    tenant_id: str | None = Header(default=None, convert_underscores=False, alias="X-Tenant-Id"),
+    request: Request = None,
+) -> dict[str, str]:
+    tenant = _tenant_from_header(tenant_id)
+    mongo_db: AsyncIOMotorDatabase = request.app.state.mongo_db
+    sessions = mongo_db[settings.mongo_chat_session_collection]
+    messages = mongo_db[settings.mongo_chat_message_collection]
+
+    delete_result = await sessions.delete_one({"_id": session_id, "tenant_id": tenant})
+    if delete_result.deleted_count == 0:
+        raise HTTPException(404, "Session not found")
+
+    await messages.delete_many({"session_id": session_id, "tenant_id": tenant})
+    session_store = request.app.state.session_store
+    await session_store.clear_session(tenant, session_id)
+    return {"status": "deleted"}
 
 
 @router.get("/health")

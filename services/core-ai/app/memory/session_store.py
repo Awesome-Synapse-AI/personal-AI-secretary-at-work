@@ -62,3 +62,11 @@ class SessionStore:
         key = self._history_key(tenant_id, session_id)
         items = await self._redis.lrange(key, 0, -1)
         return [json.loads(item) for item in items]
+
+    async def clear_session(self, tenant_id: str, session_id: str) -> None:
+        if not self._redis:
+            return
+        await self._redis.delete(
+            self._pending_key(tenant_id, session_id),
+            self._history_key(tenant_id, session_id),
+        )

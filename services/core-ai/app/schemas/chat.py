@@ -32,6 +32,10 @@ class ChatSessionMeta(BaseModel):
     updated_at: int
 
 
+class ChatSessionRenameRequest(BaseModel):
+    title: str
+
+
 class ChatMessagePayload(BaseModel):
     id: str
     role: str
