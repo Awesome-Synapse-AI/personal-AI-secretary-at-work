@@ -4,6 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 from sqlalchemy import JSON, Column
+from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, SQLModel
 
 from app.utils import utcnow
@@ -77,13 +78,32 @@ class TravelRequest(SQLModel, table=True):
 class Ticket(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: str
-    type: "TicketType"
+    type: "TicketType" = Field(
+        sa_column=Column(
+            SAEnum(
+                TicketType,
+                name="ticket_type_enum",
+                values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            ),
+            nullable=False,
+        )
+    )
     category: Optional[str] = None
     description: str
     location: Optional[str] = None
     incident_date: Optional[date] = None
     priority: Optional[str] = None
-    status: TicketStatus = Field(default=TicketStatus.OPEN)
+    status: TicketStatus = Field(
+        default=TicketStatus.OPEN,
+        sa_column=Column(
+            SAEnum(
+                TicketStatus,
+                name="ticket_status_enum",
+                values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            ),
+            nullable=False,
+        ),
+    )
     assignee: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -113,10 +133,29 @@ class AccessRequest(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: str
     resource: str
-    requested_role: "RequestedRole"
+    requested_role: "RequestedRole" = Field(
+        sa_column=Column(
+            SAEnum(
+                RequestedRole,
+                name="requested_role_enum",
+                values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            ),
+            nullable=False,
+        )
+    )
     justification: str
     needed_by_date: Optional[date] = None
-    status: AccessStatus = Field(default=AccessStatus.PENDING)
+    status: AccessStatus = Field(
+        default=AccessStatus.PENDING,
+        sa_column=Column(
+            SAEnum(
+                AccessStatus,
+                name="access_status_enum",
+                values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            ),
+            nullable=False,
+        ),
+    )
     approver_id: Optional[str] = None
     reject_reason: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -139,7 +178,17 @@ class CalendarEvent(SQLModel, table=True):
     title: str
     start_time: datetime
     end_time: datetime
-    source_type: EventSource = Field(default=EventSource.GENERIC, index=True)
+    source_type: EventSource = Field(
+        default=EventSource.GENERIC,
+        sa_column=Column(
+            SAEnum(
+                EventSource,
+                name="event_source_enum",
+                values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            ),
+            nullable=False,
+        ),
+    )
     source_id: Optional[int] = Field(default=None, index=True)
     status: str = "busy"
     google_event_id: Optional[str] = Field(default=None, index=True)
@@ -206,7 +255,16 @@ class ParkingSpot(SQLModel, table=True):
 class Booking(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: str
-    resource_type: ResourceType
+    resource_type: ResourceType = Field(
+        sa_column=Column(
+            SAEnum(
+                ResourceType,
+                name="resource_type_enum",
+                values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            ),
+            nullable=False,
+        )
+    )
     resource_id: int
     start_time: datetime
     end_time: datetime
