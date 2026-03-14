@@ -36,6 +36,8 @@ export interface TravelRequest {
   departure_date: string;
   return_date?: string | null;
   travel_class?: string | null;
+  preferred_departure_time?: string | null;
+  preferred_return_time?: string | null;
   status: string;
   created_at: string;
   updated_at: string;
