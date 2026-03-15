@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Bot, Send, User, Sparkles, TriangleAlert, CheckCircle2, Workflow, Pencil, Trash2 } from "lucide-react";
+import { Bot, Send, User, Sparkles, TriangleAlert, CheckCircle2, Pencil, Trash2 } from "lucide-react";
 import { useChatStream } from "@/lib/hooks/useChatStream";
 import { ChatEvent, ChatMessage, PendingRequest } from "@/types/domain";
 
@@ -30,7 +30,7 @@ export default function ChatPage() {
     setDraft("");
   };
 
-  const timeline = buildPipeline(events);
+  const activity = buildActivity(events);
 
   return (
     <div className="grid gap-4 lg:grid-cols-[340px,1fr]">
@@ -91,24 +91,13 @@ export default function ChatPage() {
       </aside>
 
       <div className="space-y-4">
-        <header className="flex items-start justify-between gap-4">
-          <div>
-            <p className="pill w-fit">Employee Chat</p>
-            <h1 className="mt-2 text-2xl font-semibold">Chat with the core-ai agents</h1>
-            <p className="text-slate-300">
-              {"Streaming tokens + Router -> Domain -> Tools pipeline visualization."}
-            </p>
-          </div>
-          {connectionError ? (
-            <span className="badge bg-amber-500/20 text-amber-100">{connectionError}</span>
-          ) : connecting ? (
-            <span className="badge">Connecting...</span>
-          ) : (
-            <span className="badge text-emerald-200">Live</span>
-          )}
-        </header>
-
-        <AgentPipeline timeline={timeline} />
+        <LatestActivityCard
+          latestActivity={activity.latestActivity}
+          connectionState={
+            connectionError ? connectionError : connecting ? "Connecting..." : "Live"
+          }
+          hasConnectionError={Boolean(connectionError)}
+        />
 
         <div className="glass-card flex flex-col gap-4 p-4">
           <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
@@ -227,45 +216,55 @@ function PendingCard({ pending }: { pending: PendingRequest }) {
   );
 }
 
-function AgentPipeline({ timeline }: { timeline: PipelineState }) {
-  const steps = [
-    { key: "router", label: "Router" },
-    { key: "domain", label: "Domain" },
-    { key: "tools", label: "Tools" },
-  ] as const;
+function LatestActivityCard({
+  latestActivity,
+  connectionState,
+  hasConnectionError,
+}: {
+  latestActivity: string;
+  connectionState: string;
+  hasConnectionError: boolean;
+}) {
   return (
-    <div className="glass-card flex items-center gap-4 p-3 text-sm">
-      <Workflow className="h-4 w-4 text-emerald-300" />
-      <div className="flex w-full flex-col gap-2 md:flex-row md:items-center">
-        {steps.map((step, idx) => {
-          const state = timeline[step.key];
-          const color = state === "done" ? "bg-emerald-500" : state === "active" ? "bg-cyan-400" : "bg-slate-600";
-          return (
-            <div key={step.key} className="flex items-center gap-2">
-              <span className={`h-2.5 w-2.5 rounded-full ${color} shadow-glow`} />
-              <span className="font-medium text-slate-100">{step.label}</span>
-              {idx < steps.length - 1 && <span className="h-px w-8 bg-white/10 md:w-12" />}
-            </div>
-          );
-        })}
+    <div className="glass-card p-3 text-sm">
+      <div className="flex items-center justify-between">
+        <p className="text-xs uppercase tracking-[0.15em] text-slate-400">Latest agent activity</p>
+        <span className={`badge ${hasConnectionError ? "bg-amber-500/20 text-amber-100" : "text-emerald-200"}`}>
+          {connectionState}
+        </span>
       </div>
-      <span className="text-xs text-slate-400">derived from agent events</span>
+      <p className="mt-2 text-sm font-medium text-emerald-200">{latestActivity}</p>
     </div>
   );
 }
 
-type PipelineState = { router: "idle" | "active" | "done"; domain: "idle" | "active" | "done"; tools: "idle" | "active" | "done" };
-
-function buildPipeline(events: ChatEvent[]): PipelineState {
-  const state: PipelineState = { router: "idle", domain: "idle", tools: "idle" };
+function buildActivity(events: ChatEvent[]): { latestActivity: string; recentActivities: string[] } {
+  const activityTrail: string[] = [];
   for (const evt of events) {
-    if (evt.type === "agent_started" && evt.data?.agent === "RouterAgent") state.router = "active";
-    if (evt.type === "agent_finished" && evt.data?.agent === "RouterAgent") state.router = "done";
-    if (evt.type === "agent_started" && evt.data?.agent === "DomainAgent") state.domain = "active";
-    if (evt.type === "agent_finished" && evt.data?.agent === "DomainAgent") state.domain = "done";
-    if (evt.type === "tool_call") state.tools = "active";
-    if (evt.type === "tool_result") state.tools = "done";
+    const activity = toActivityText(evt);
+    if (activity) {
+      const prev = activityTrail[activityTrail.length - 1];
+      if (prev !== activity) activityTrail.push(activity);
+    }
   }
-  return state;
+  return {
+    latestActivity: activityTrail[activityTrail.length - 1] || "Waiting for next request",
+    recentActivities: activityTrail.slice(-4),
+  };
+}
+
+function toActivityText(evt: ChatEvent): string | null {
+  if (evt.type === "activity" && typeof evt.data?.message === "string" && evt.data.message.trim()) {
+    return evt.data.message.trim();
+  }
+  if (evt.type === "router_pending") return "Resuming previous in-progress request";
+  if (evt.type === "router_main_classified_llm" || evt.type === "router_main_classified_default") return "Classifying the user's request";
+  if (evt.type === "router_request_domain_llm" || evt.type === "router_request_domain_default") return "Routing request to the right domain";
+  if (evt.type === "router_subroute_classified" || evt.type === "router_subroute_default") return "Classifying request type";
+  if (evt.type === "agent_started" && evt.data?.agent === "DomainAgent") return "Extracting information from the user request";
+  if (evt.type === "tool_call") return "Recording user's request in database";
+  if (evt.type === "tool_result") return "Recorded user's request in database";
+  if (evt.type === "tool_error") return "Failed to record user's request in database";
+  return null;
 }
 

@@ -16,3 +16,4 @@ class ChatState(TypedDict, total=False):
     response: str
     actions: list[dict[str, Any]]
     events: list[dict[str, Any]]
+    event_queue: Any

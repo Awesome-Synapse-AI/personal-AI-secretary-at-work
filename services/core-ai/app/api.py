@@ -1857,19 +1857,37 @@ async def chat_stream(websocket: WebSocket, session_id: str | None = None) -> No
                 continue
             message = incoming.get("message", "")
             tenant_id = incoming.get("tenant_id")
-
-            result = await handle_chat(
-                session_store,
-                message,
-                session_id,
-                user,
-                tenant_id,
-                mongo_db=mongo_db,
+            event_queue: asyncio.Queue[dict] = asyncio.Queue()
+            task = asyncio.create_task(
+                handle_chat(
+                    session_store,
+                    message,
+                    session_id,
+                    user,
+                    tenant_id,
+                    mongo_db=mongo_db,
+                    event_queue=event_queue,
+                )
             )
+            streamed_events: list[dict] = []
+            while not task.done():
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                streamed_events.append(event)
+                await websocket.send_json(event)
+
+            result = await task
 
             session_id = result.get("session_id", session_id)
 
-            for event in result.get("events", []):
+            while not event_queue.empty():
+                event = event_queue.get_nowait()
+                streamed_events.append(event)
+                await websocket.send_json(event)
+
+            for event in result.get("events", [])[len(streamed_events):]:
                 await websocket.send_json(event)
 
             for token_chunk in iter_tokens(result.get("message", "")):

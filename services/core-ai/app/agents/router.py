@@ -118,12 +118,24 @@ async def _doc_scope_with_llm(message: str) -> str | None:
 
 
 def _add_event(state: ChatState, event_type: str, data: dict | None = None) -> None:
-    state.setdefault("events", []).append({"type": event_type, "data": data or {}})
+    event = {"type": event_type, "data": data or {}}
+    state.setdefault("events", []).append(event)
+    queue = state.get("event_queue")
+    if queue is not None:
+        try:
+            queue.put_nowait(event)
+        except Exception:
+            pass
+
+
+def _add_activity(state: ChatState, message: str, stage: str = "router") -> None:
+    _add_event(state, "activity", {"stage": stage, "message": message})
 
 
 @traceable(name="router_node", run_type="chain")
 async def router_node(state: ChatState) -> ChatState:
     _add_event(state, "agent_started", {"agent": "RouterAgent"})
+    _add_activity(state, "Classifying the user's request", stage="router")
 
     pending = state.get("pending_request")
     if pending:
@@ -149,6 +161,7 @@ async def router_node(state: ChatState) -> ChatState:
         message = state.get("message", "")
         state["sub_route_fields"] = {}
 
+        _add_activity(state, "Classifying the user's request", stage="router")
         main_route_result = await _classify_main_route_with_llm(message)
         if main_route_result:
             state["main_route"], state["sensitivity"] = main_route_result
@@ -167,6 +180,7 @@ async def router_node(state: ChatState) -> ChatState:
             )
 
         if state["main_route"] == "request":
+            _add_activity(state, "Routing request to the right domain", stage="router")
             request_domain = await _classify_request_domain_with_llm(message)
             if request_domain:
                 state["domain"] = request_domain
@@ -188,6 +202,7 @@ async def router_node(state: ChatState) -> ChatState:
     main_route = state.get("main_route", "generic")
     if main_route == "request" and state.get("domain") in REQUEST_SUBMISSION_DOMAINS:
         if not pending:
+            _add_activity(state, "Classifying request type", stage="router")
             request_type, fields = await classify_request(state["domain"], state.get("message", ""))
             if request_type is not None:
                 state["sub_route"] = request_type.value
@@ -207,6 +222,7 @@ async def router_node(state: ChatState) -> ChatState:
     elif main_route == "doc_qa":
         state["sub_route"] = "doc_qa"
         if not state.get("doc_scope"):
+            _add_activity(state, "Classifying policy scope", stage="router")
             llm_scope = await _doc_scope_with_llm(state.get("message", ""))
             state["doc_scope"] = llm_scope or "user_docs"
     else:

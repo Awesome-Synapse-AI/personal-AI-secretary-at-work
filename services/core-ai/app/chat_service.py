@@ -24,6 +24,7 @@ async def handle_chat(
     user: UserContext,
     tenant_id: str | None,
     mongo_db: AsyncIOMotorDatabase | None = None,
+    event_queue: Any | None = None,
 ) -> dict[str, Any]:
     session_id = session_id or str(uuid.uuid4())
     tenant_id = tenant_id or settings.default_tenant_id
@@ -39,6 +40,8 @@ async def handle_chat(
         "events": [],
         "actions": [],
     }
+    if event_queue is not None:
+        state["event_queue"] = event_queue
 
     result: ChatState = await graph.ainvoke(state)
 

@@ -27,7 +27,18 @@ logger = structlog.get_logger("domain_agent")
 
 
 def _add_event(state: ChatState, event_type: str, data: dict | None = None) -> None:
-    state.setdefault("events", []).append({"type": event_type, "data": data or {}})
+    event = {"type": event_type, "data": data or {}}
+    state.setdefault("events", []).append(event)
+    queue = state.get("event_queue")
+    if queue is not None:
+        try:
+            queue.put_nowait(event)
+        except Exception:
+            pass
+
+
+def _add_activity(state: ChatState, message: str, stage: str = "domain") -> None:
+    _add_event(state, "activity", {"stage": stage, "message": message})
 
 
 async def _resolve_subroute_classification(
@@ -100,6 +111,7 @@ async def domain_node(state: ChatState) -> ChatState:
             "sub_route": state.get("sub_route"),
         },
     )
+    _add_activity(state, "Extracting information from the user request", stage="domain")
 
     main_route = state.get("main_route", state.get("domain", "generic"))
     domain = state.get("domain", "generic") if main_route == "request" else main_route
@@ -144,6 +156,7 @@ async def _handle_hr(
         updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
+            _add_activity(state, "Identifying missing information", stage="domain")
             return next_question(pending), pending, []
         action = await _submit_leave_request(pending, state)
         if action.get("status") != "submitted":
@@ -155,6 +168,7 @@ async def _handle_hr(
     if request_type == RequestType.LEAVE:
         pending = build_pending_request("hr", RequestType.LEAVE, fields)
         if pending["missing"]:
+            _add_activity(state, "Identifying missing information", stage="domain")
             return next_question(pending), pending, []
         action = await _submit_leave_request(pending, state)
         if action.get("status") != "submitted":
@@ -172,6 +186,7 @@ async def _handle_ops(
         updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
+            _add_activity(state, "Identifying missing information", stage="domain")
             return next_question(pending), pending, []
         if pending.get("type") == RequestType.EXPENSE:
             action = await _submit_expense_request(pending, state)
@@ -189,6 +204,7 @@ async def _handle_ops(
     if request_type in {RequestType.EXPENSE, RequestType.TRAVEL}:
         pending = build_pending_request("ops", request_type, fields)
         if pending["missing"]:
+            _add_activity(state, "Identifying missing information", stage="domain")
             return next_question(pending), pending, []
         if request_type == RequestType.EXPENSE:
             action = await _submit_expense_request(pending, state)
@@ -212,6 +228,7 @@ async def _handle_it(
         updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
+            _add_activity(state, "Identifying missing information", stage="domain")
             if pending.get("type") == RequestType.TICKET:
                 prompt = await _ticket_prompt(pending, state)
                 return prompt, pending, []
@@ -232,6 +249,7 @@ async def _handle_it(
     if request_type in {RequestType.ACCESS, RequestType.TICKET}:
         pending = build_pending_request("it", request_type, fields)
         if pending["missing"]:
+            _add_activity(state, "Identifying missing information", stage="domain")
             if request_type == RequestType.TICKET:
                 prompt = await _ticket_prompt(pending, state)
                 return prompt, pending, []
@@ -258,6 +276,7 @@ async def _handle_workspace(
         updates = await _extract_pending_updates(pending, message)
         pending = update_pending_request(pending, updates)
         if pending["missing"]:
+            _add_activity(state, "Identifying missing information", stage="domain")
             prompt = await _workspace_prompt(pending, state)
             return prompt, pending, []
         action = await _submit_workspace_booking(pending, state)
@@ -285,6 +304,7 @@ async def _handle_workspace(
         enriched_fields = _merge_fields(fields, llm_fields)
         pending = build_pending_request("workspace", request_type, enriched_fields)
         if pending["missing"]:
+            _add_activity(state, "Identifying missing information", stage="domain")
             prompt = await _workspace_prompt(pending, state)
             return prompt, pending, []
         action = await _submit_workspace_booking(pending, state)
@@ -683,28 +703,34 @@ async def _call_tool(
     path: str,
     payload: dict[str, Any],
     action_type: str,
-    ) -> dict[str, Any]:
-        _add_event(state, "tool_call", {"service": service, "path": path})
-        try:
-            result = await tool_runner.call(service, "POST", path, payload)
-            _add_event(state, "tool_result", {"service": service, "result": result})
-            status = (
-                result.get("result", {}).get("status")
-                or result.get("status")
-                or "submitted"
-            )
-            return {
-                "type": action_type,
-                "status": status,
-                "payload": payload,
-                "result": result.get("result"),
-                # Surface either an explicit error from the tool or a skip reason
-                # (e.g., TOOLS_ENABLED=false) so the user sees a useful message.
-                "error": result.get("error") or result.get("reason"),
-            }
-        except Exception as exc:  # pragma: no cover - network errors
-            _add_event(state, "tool_error", {"service": service, "error": str(exc)})
-            return {"type": action_type, "status": "failed", "payload": payload}
+) -> dict[str, Any]:
+    _add_activity(state, "Recording user's request in database", stage="tools")
+    _add_event(state, "tool_call", {"service": service, "path": path})
+    try:
+        result = await tool_runner.call(service, "POST", path, payload)
+        _add_event(state, "tool_result", {"service": service, "result": result})
+        status = (
+            result.get("result", {}).get("status")
+            or result.get("status")
+            or "submitted"
+        )
+        if status in {"ok", "submitted", "success", "approved"}:
+            _add_activity(state, "Recorded user's request in database", stage="tools")
+        else:
+            _add_activity(state, "Request recording finished with follow-up needed", stage="tools")
+        return {
+            "type": action_type,
+            "status": status,
+            "payload": payload,
+            "result": result.get("result"),
+            # Surface either an explicit error from the tool or a skip reason
+            # (e.g., TOOLS_ENABLED=false) so the user sees a useful message.
+            "error": result.get("error") or result.get("reason"),
+        }
+    except Exception as exc:  # pragma: no cover - network errors
+        _add_event(state, "tool_error", {"service": service, "error": str(exc)})
+        _add_activity(state, "Failed to record user's request in database", stage="tools")
+        return {"type": action_type, "status": "failed", "payload": payload}
 
 
 def _required_fields(req_enum: RequestType | None, filled: dict[str, Any] | None = None) -> list[str]:
