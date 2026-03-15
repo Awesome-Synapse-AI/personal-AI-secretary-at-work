@@ -221,6 +221,9 @@ def _classification_prompt(domain: str, allowed: list[RequestType]) -> str:
         "If the user already names what to book (e.g., \"book a room\"), set resource_type accordingly and do not ask again. "
         "Resource type synonyms: meeting room/conference room/boardroom -> room; hot desk/workstation -> desk; "
         "projector/monitor/laptop/whiteboard -> equipment; parking spot/parking space/garage -> parking. "
+        "Disambiguation priority for workspace: explicit booking noun after verbs like book/reserve (room/desk/equipment/parking) "
+        "has highest priority over other words in the sentence. "
+        "Example: \"reserve Zephyr room\" => resource_type room, resource_name Zephyr. "
         "Use null for unknown values."
     )
     if domain == "ops":
@@ -320,6 +323,7 @@ def _extraction_guidance(request_type: RequestType) -> str:
             "If the user mentions hot desk/workstation set resource_type=\"desk\". "
             "If the user mentions projector/monitor/laptop/whiteboard set resource_type=\"equipment\". "
             "If the user mentions parking spot/parking space/garage set resource_type=\"parking\". "
+            "Priority rule: if the user explicitly says reserve/book <name> room (or desk/parking), use that explicit type even if other equipment words appear. "
             "Only set resource_name when the user explicitly names a specific resource (e.g., \"Orion\", \"Desk A3\", \"B2\"). "
             "Do not copy the entire sentence into resource_name or start_time/end_time. "
             "Combine the date with the times when possible (YYYY-MM-DD HH:MM 24h is preferred). "
@@ -327,6 +331,8 @@ def _extraction_guidance(request_type: RequestType) -> str:
             "Examples:\n"
             'Input: "I want to reserve a meeting room from 9:00 a.m. to 12:00 p.m. on 18/Oct/2025"\n'
             'Output: {"request_type":"workspace_booking","fields":{"resource_type":"room","resource_name":null,"resource_id":null,"start_time":"2025-10-18 09:00","end_time":"2025-10-18 12:00","location":null,"description":null}}\n'
+            'Input: "reserve Zephyr room on 16/Mar/2026 from 9:00 a.m. to 11:00 a.m."\n'
+            'Output: {"request_type":"workspace_booking","fields":{"resource_type":"room","resource_name":"Zephyr","resource_id":null,"start_time":"2026-03-16 09:00","end_time":"2026-03-16 11:00","location":null,"description":null}}\n'
             'Input: "Reserve a hot desk on 2026-03-25 from 09:00 to 12:00"\n'
             'Output: {"request_type":"workspace_booking","fields":{"resource_type":"desk","resource_name":null,"resource_id":null,"start_time":"2026-03-25 09:00","end_time":"2026-03-25 12:00","location":null,"description":null}}\n'
             'Input: "Reserve parking spot B2 on 2026-03-26 08:00-10:00"\n'
@@ -428,7 +434,16 @@ def _filter_fields_by_evidence(
     def _has_resource_type(val: Any) -> bool:
         if not isinstance(val, str):
             return False
-        return any(word in lower for word in (val.lower(), "room", "desk", "equipment", "parking", "spot"))
+        normalized = _normalize_resource_type(val)
+        if normalized == "room":
+            return any(word in lower for word in ("room", "meeting room", "conference room", "boardroom"))
+        if normalized == "desk":
+            return any(word in lower for word in ("desk", "hot desk", "workstation", "seat", "cubicle"))
+        if normalized == "equipment":
+            return any(word in lower for word in ("equipment", "projector", "monitor", "laptop", "whiteboard", "speaker"))
+        if normalized == "parking":
+            return any(word in lower for word in ("parking", "parking spot", "parking space", "garage", "car park", "spot"))
+        return False
 
     cleaned = dict(fields)
     if req_enum == RequestType.EXPENSE:

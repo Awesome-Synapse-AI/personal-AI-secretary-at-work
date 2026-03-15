@@ -301,7 +301,9 @@ async def _handle_workspace(
     if request_type == RequestType.WORKSPACE_BOOKING:
         # Prefer LLM extraction over heuristics for workspace details.
         llm_fields = await extract_fields(RequestType.WORKSPACE_BOOKING, message)
-        enriched_fields = _merge_fields(fields, llm_fields)
+        heuristic_fields = _infer_workspace_fields(message)
+        enriched_fields = _merge_fields(fields, llm_fields, heuristic_fields)
+        enriched_fields = _repair_workspace_time_fields(enriched_fields, heuristic_fields)
         pending = build_pending_request("workspace", request_type, enriched_fields)
         if pending["missing"]:
             _add_activity(state, "Identifying missing information", stage="domain")
@@ -927,13 +929,14 @@ async def _extract_pending_updates(pending: dict[str, Any], message: str) -> dic
                 merged[key] = value
 
     if request_type == RequestType.WORKSPACE_BOOKING:
-        # Only fall back to heuristics if the LLM didn't extract anything useful.
-        inferred = {} if merged else _infer_workspace_fields(message)
+        inferred = _infer_workspace_fields(message)
     else:
         inferred = _infer_fields_from_message(request_type, message, pending)
     for key, value in inferred.items():
         if value is not None and merged.get(key) is None:
             merged[key] = value
+    if request_type == RequestType.WORKSPACE_BOOKING:
+        merged = _repair_workspace_time_fields(merged, inferred)
 
     for key in missing:
         if merged.get(key) is not None:
@@ -953,7 +956,11 @@ def _coerce_answer_for_field(field: str, message: str) -> Any:
         if not _looks_like_date_expression(text):
             return None
         return _parse_iso_date_strict(text)
-    if field in {"start_time", "end_time", "description", "location", "resource", "resource_name", "entity"}:
+    if field in {"start_time", "end_time"}:
+        if not _looks_like_time_expression(text):
+            return None
+        return text
+    if field in {"description", "location", "resource", "resource_name", "entity"}:
         return text
     if field in {"origin", "destination", "leave_type", "category", "project_code", "reason", "justification"}:
         if field in {"origin", "destination"}:
@@ -1228,17 +1235,27 @@ def _infer_workspace_fields(text: str) -> dict[str, Any]:
         if name.isdigit():
             fields["resource_id"] = int(name)
 
+    normalized_text = _normalize_ampm_markers(text)
     # Time range: "from X to Y" or "X-Y"
-    span = re.search(r"\b(?:from|between)\s+(.+?)\s+(?:to|and|until)\s+(.+?)(?=$|[,.])", text, flags=re.IGNORECASE)
+    time_token = r"\d{1,2}(?::\d{2})?\s*(?:am|pm)?"
+    span = re.search(
+        rf"\b(?:from|between)\s+({time_token})\s+(?:to|and|until)\s+({time_token})(?=\s|$|[,.])",
+        normalized_text,
+        flags=re.IGNORECASE,
+    )
     if not span:
-        span = re.search(r"\b(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|to|until)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)", text, flags=re.IGNORECASE)
+        span = re.search(
+            rf"\b({time_token})\s*(?:-|to|until)\s*({time_token})(?=\s|$|[,.])",
+            normalized_text,
+            flags=re.IGNORECASE,
+        )
     if span:
-        fields["start_time"] = span.group(1).strip()
-        fields["end_time"] = span.group(2).strip()
+        fields["start_time"] = _normalize_time_token(span.group(1))
+        fields["end_time"] = _normalize_time_token(span.group(2))
     else:
-        single = re.search(r"\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b", text, flags=re.IGNORECASE)
+        single = re.search(rf"\bat\s+({time_token})\b", normalized_text, flags=re.IGNORECASE)
         if single:
-            fields["start_time"] = single.group(1).strip()
+            fields["start_time"] = _normalize_time_token(single.group(1))
 
     # If a single date is present, attach it to times if they don't already contain a date.
     dates = _extract_iso_dates_from_text(text)
@@ -1264,6 +1281,63 @@ def _infer_workspace_resource_type(text: str) -> str | None:
     return None
 
 
+def _normalize_time_token(value: str) -> str:
+    token = (value or "").strip()
+    token = re.sub(r"\s+", " ", token)
+    token = _normalize_ampm_markers(token)
+    token = token.rstrip(".,;")
+    return token
+
+
+def _looks_like_time_expression(text: str) -> bool:
+    normalized = _normalize_ampm_markers(text)
+    return bool(
+        re.search(
+            r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _normalize_ampm_markers(text: str) -> str:
+    normalized = re.sub(r"(?i)\ba\s*\.?\s*m\.?", "am", text or "")
+    normalized = re.sub(r"(?i)\bp\s*\.?\s*m\.?", "pm", normalized)
+    return normalized
+
+
+def _repair_workspace_time_fields(fields: dict[str, Any], inferred: dict[str, Any]) -> dict[str, Any]:
+    repaired = dict(fields or {})
+    for key in ("start_time", "end_time"):
+        current = repaired.get(key)
+        inferred_value = inferred.get(key)
+        if inferred_value is None:
+            continue
+        if current is None:
+            repaired[key] = inferred_value
+            continue
+        current_text = str(current)
+        inferred_text = str(inferred_value)
+        current_has_time = _looks_like_time_expression(current_text)
+        inferred_has_time = _looks_like_time_expression(inferred_text)
+        if not current_has_time and inferred_has_time:
+            repaired[key] = inferred_value
+        elif _contains_date_token(current_text) and inferred_has_time and not current_has_time:
+            repaired[key] = inferred_value
+        elif _is_malformed_time_token(current_text) and inferred_has_time:
+            repaired[key] = inferred_value
+    return repaired
+
+
+def _is_malformed_time_token(text: str) -> bool:
+    normalized = _normalize_ampm_markers(text)
+    # Cases like "11:00 a" / "9 p" where meridiem is truncated.
+    if re.search(r"\b\d{1,2}(?::\d{2})?\s*[ap]\b", normalized, flags=re.IGNORECASE):
+        if not re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", normalized, flags=re.IGNORECASE):
+            return True
+    return False
+
+
 def _contains_date_token(text: str) -> bool:
     return bool(
         re.search(
@@ -1285,6 +1359,11 @@ def _valid_resource_token(token: str) -> bool:
         "a",
         "the",
         "my",
+        "on",
+        "at",
+        "from",
+        "to",
+        "for",
     }
     return token.lower() not in stop
 

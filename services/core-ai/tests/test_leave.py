@@ -34,7 +34,7 @@ def test_create_leave_request_reduces_entitlement(client, session):
         f"{settings.api_prefix}/domain/availability",
         params={"start": "2026-02-10", "end": "2026-02-12"},
     ).json()["events"]
-    assert any("Leave: annual" in ev["title"] for ev in events)
+    assert not any("Leave: annual" in ev["title"] for ev in events)
 
 
 def test_leave_request_insufficient_balance_400(client, session):
@@ -63,6 +63,11 @@ def test_approve_and_reject_leave_request(client, session):
     approve = client.post(f"{settings.api_prefix}/domain/requests/{req_id}/approve")
     assert approve.status_code == 200
     assert approve.json()["request"]["status"] == "approved"
+    events = client.get(
+        f"{settings.api_prefix}/domain/availability",
+        params={"start": "2026-03-01", "end": "2026-03-01"},
+    ).json()["events"]
+    assert any("Leave: annual" in ev["title"] for ev in events)
 
     # create another request for rejection path
     payload["start_date"] = "2026-03-05"

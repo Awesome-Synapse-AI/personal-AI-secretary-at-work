@@ -4,6 +4,7 @@ from app.agents import domain as domain_agent
 from app.agents.clarification import (
     RequestType,
     _classification_prompt,
+    _extraction_guidance,
     build_pending_request,
     classify_request,
     extract_fields,
@@ -482,6 +483,67 @@ async def test_workspace_pending_parses_resource_and_time_span(monkeypatch):
     assert captured["payload"]["resource_name"] == "Room 7"
     assert captured["payload"]["start_time"] == "2026-08-10 10:00"
     assert captured["payload"]["end_time"] == "2026-08-10 11:00"
+
+
+@pytest.mark.asyncio
+async def test_workspace_new_request_repairs_bad_llm_time_fields(monkeypatch):
+    captured = {}
+
+    async def fake_classify_request(*args, **kwargs):
+        return RequestType.WORKSPACE_BOOKING, {
+            "resource_type": "room",
+            "resource_name": "Zephyr",
+            "resource_id": 7,
+            # Simulate low-quality extraction (date-only start and truncated am/pm end).
+            "start_time": "2026-03-16",
+            "end_time": "11:00 a",
+        }
+
+    async def fake_extract_fields(*args, **kwargs):
+        return {
+            "resource_type": "room",
+            "resource_name": "Zephyr",
+            "resource_id": 7,
+            "start_time": "2026-03-16",
+            "end_time": "11:00 a",
+        }
+
+    async def fake_call_tool(state, service, path, payload, action_type):
+        captured["path"] = path
+        captured["payload"] = payload
+        return {"type": action_type, "status": "submitted", "result": {"status": "submitted"}}
+
+    monkeypatch.setattr(domain_agent, "classify_request", fake_classify_request)
+    monkeypatch.setattr(domain_agent, "extract_fields", fake_extract_fields)
+    monkeypatch.setattr(domain_agent, "_call_tool", fake_call_tool)
+
+    state = ChatState(
+        message="reserve Zephyr room on 16/Mar/2026 from 9:00 a.m. to 11:00 a.m.",
+        domain="workspace",
+        pending_request=None,
+        actions=[],
+        events=[],
+    )
+
+    result = await domain_agent.domain_node(state)
+
+    assert result["pending_request"] is None
+    assert captured["path"] == "/rooms/7/book"
+    assert captured["payload"]["resource_name"] == "Zephyr"
+    assert captured["payload"]["start_time"] == "2026-03-16 9:00 am"
+    assert captured["payload"]["end_time"] == "2026-03-16 11:00 am"
+
+
+def test_workspace_prompt_contains_explicit_type_priority_rule():
+    prompt = _classification_prompt("workspace", [RequestType.WORKSPACE_BOOKING]).lower()
+    assert "disambiguation priority for workspace" in prompt
+    assert "reserve zephyr room" in prompt
+
+
+def test_workspace_extraction_guidance_contains_room_disambiguation_examples():
+    guidance = _extraction_guidance(RequestType.WORKSPACE_BOOKING).lower()
+    assert "priority rule" in guidance
+    assert "reserve zephyr room on 16/mar/2026" in guidance
 
 
 @pytest.mark.asyncio
