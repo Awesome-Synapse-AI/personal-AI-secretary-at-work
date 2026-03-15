@@ -6,7 +6,14 @@ from app.state import ChatState
 logger = structlog.get_logger("guardrail_agent")
 
 def _add_event(state: ChatState, event_type: str, data: dict | None = None) -> None:
-    state.setdefault("events", []).append({"type": event_type, "data": data or {}})
+    event = {"type": event_type, "data": data or {}}
+    state.setdefault("events", []).append(event)
+    queue = state.get("event_queue")
+    if queue is not None:
+        try:
+            queue.put_nowait(event)
+        except Exception:
+            pass
 
 
 def _has_role(state: ChatState, role: str) -> bool:
