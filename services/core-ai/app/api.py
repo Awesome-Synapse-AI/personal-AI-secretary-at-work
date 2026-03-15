@@ -2,6 +2,8 @@ import os
 import asyncio
 import uuid
 import io
+import logging
+from functools import lru_cache
 from pathlib import Path
 from datetime import date, datetime
 from typing import Optional, List
@@ -75,6 +77,7 @@ from app.schemas.chat import (
 from app.utils import iter_tokens, utcnow
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ---------- helpers ----------
@@ -338,6 +341,7 @@ def _as_date(value: str) -> date:
         return dt.date()
 
 
+@lru_cache(maxsize=1)
 def _google_calendar_service():
     enabled = os.getenv("GOOGLE_CALENDAR_ENABLED", "").lower() in {"1", "true", "yes"}
     creds_path = os.getenv("GOOGLE_CALENDAR_CREDENTIALS")
@@ -347,14 +351,19 @@ def _google_calendar_service():
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
-    except Exception:
+    except Exception as exc:
+        logger.warning("Google Calendar client import failed: %s", exc)
         return None, None
     try:
         scopes = ["https://www.googleapis.com/auth/calendar"]
         creds = service_account.Credentials.from_service_account_file(creds_path, scopes=scopes)
+        subject = os.getenv("GOOGLE_CALENDAR_SUBJECT")
+        if subject:
+            creds = creds.with_subject(subject)
         service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         return service, calendar_id
-    except Exception:
+    except Exception as exc:
+        logger.warning("Google Calendar service initialization failed: %s", exc)
         return None, None
 
 
@@ -382,10 +391,11 @@ def _create_event(
     session.refresh(event)
     service, calendar_id = _google_calendar_service()
     if service and calendar_id:
+        timezone = os.getenv("GOOGLE_CALENDAR_TIMEZONE", "UTC")
         body = {
             "summary": title,
-            "start": {"dateTime": start_time.isoformat()},
-            "end": {"dateTime": end_time.isoformat()},
+            "start": {"dateTime": start_time.isoformat(), "timeZone": timezone},
+            "end": {"dateTime": end_time.isoformat(), "timeZone": timezone},
             "description": f"{source_type.value} request #{source_id}" if source_id else title,
         }
         try:
@@ -394,9 +404,9 @@ def _create_event(
             session.add(event)
             session.commit()
             session.refresh(event)
-        except Exception:
-            # Silently ignore Google Calendar failures to avoid blocking core flow
-            pass
+        except Exception as exc:
+            # Keep core flow non-blocking, but log the failure for troubleshooting.
+            logger.warning("Google Calendar event insert failed: %s", exc)
     return event
 
 
@@ -866,15 +876,6 @@ async def create_leave_request(
     session.add(ent)
     session.commit()
     session.refresh(lr)
-    _create_event(
-        session,
-        user_id,
-        title=f"Leave: {payload.leave_type}",
-        start_time=datetime.combine(start, datetime.min.time()),
-        end_time=datetime.combine(end, datetime.max.time()),
-        source_type=EventSource.LEAVE,
-        source_id=lr.id,
-    )
     return {"status": "submitted", "request": lr}
 
 
@@ -920,6 +921,23 @@ async def approve_leave_request(
     )
     session.commit()
     session.refresh(lr)
+    existing_leave_event = session.exec(
+        select(CalendarEvent).where(
+            CalendarEvent.source_type == EventSource.LEAVE,
+            CalendarEvent.source_id == lr.id,
+            CalendarEvent.user_id == lr.user_id,
+        )
+    ).first()
+    if not existing_leave_event:
+        _create_event(
+            session,
+            lr.user_id,
+            title=f"Leave: {lr.leave_type}",
+            start_time=datetime.combine(lr.start_date, datetime.min.time()),
+            end_time=datetime.combine(lr.end_date, datetime.max.time()),
+            source_type=EventSource.LEAVE,
+            source_id=lr.id,
+        )
     return {"status": "approved", "request": lr}
 
 
@@ -1004,15 +1022,6 @@ async def create_travel(
     session.add(data)
     session.commit()
     session.refresh(data)
-    _create_event(
-        session,
-        _current_user_id(user),
-        title=f"Travel: {travel.origin} -> {travel.destination}",
-        start_time=datetime.combine(date.fromisoformat(travel.departure_date), datetime.min.time()),
-        end_time=datetime.combine(date.fromisoformat(travel.return_date) if travel.return_date else date.fromisoformat(travel.departure_date), datetime.max.time()),
-        source_type=EventSource.TRAVEL,
-        source_id=data.id,
-    )
     return {"status": "submitted", "travel": data.model_dump(mode="python")}
 
 
@@ -1161,6 +1170,23 @@ async def approve_travel(
     )
     session.commit()
     session.refresh(tr)
+    existing_travel_event = session.exec(
+        select(CalendarEvent).where(
+            CalendarEvent.source_type == EventSource.TRAVEL,
+            CalendarEvent.source_id == tr.id,
+            CalendarEvent.user_id == tr.user_id,
+        )
+    ).first()
+    if not existing_travel_event:
+        _create_event(
+            session,
+            tr.user_id,
+            title=f"Travel: {tr.origin} -> {tr.destination}",
+            start_time=datetime.combine(tr.departure_date, datetime.min.time()),
+            end_time=datetime.combine(tr.return_date if tr.return_date else tr.departure_date, datetime.max.time()),
+            source_type=EventSource.TRAVEL,
+            source_id=tr.id,
+        )
     return {"status": "approved", "travel": tr.model_dump(mode="python"), "reason": payload.reason if payload else None}
 
 

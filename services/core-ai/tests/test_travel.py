@@ -13,6 +13,11 @@ def test_create_travel_and_conflict_on_submit(client):
     }
     ok = client.post(f"{settings.api_prefix}/domain/travel-requests", json=payload)
     assert ok.status_code == 200
+    events = client.get(
+        f"{settings.api_prefix}/domain/availability",
+        params={"start": "2026-04-01", "end": "2026-04-05"},
+    ).json()["events"]
+    assert not any("Travel: NYC -> LAX" in ev["title"] for ev in events)
 
     conflict = client.post(
         f"{settings.api_prefix}/domain/travel-requests",
@@ -84,6 +89,11 @@ def test_approve_travel_and_creation_conflict(client, session):
     approve_first = client.post(f"{settings.api_prefix}/domain/travel-requests/{first_id}/approve")
     assert approve_first.status_code == 200
     assert approve_first.json()["travel"]["status"] == "approved"
+    events = client.get(
+        f"{settings.api_prefix}/domain/availability",
+        params={"start": "2026-05-01", "end": "2026-05-05"},
+    ).json()["events"]
+    assert any("Travel: NYC -> SEA" in ev["title"] for ev in events)
 
     conflict = client.post(
         f"{settings.api_prefix}/domain/travel-requests",

@@ -118,10 +118,16 @@ services:
       DOMAIN_SERVICE_URL: http://core-ai:8000/api/v1/domain
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HUGGINGFACE_HUB_CACHE: /data/hf-cache
+      GOOGLE_CALENDAR_ENABLED: ${GOOGLE_CALENDAR_ENABLED:-false}
+      GOOGLE_CALENDAR_CREDENTIALS: ${GOOGLE_CALENDAR_CREDENTIALS:-/run/secrets/google_calendar_credentials.json}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-primary}
+      GOOGLE_CALENDAR_TIMEZONE: ${GOOGLE_CALENDAR_TIMEZONE:-UTC}
+      GOOGLE_CALENDAR_SUBJECT: ${GOOGLE_CALENDAR_SUBJECT:-}
     ports:
       - "8000:8000"
     volumes:
       - ../../hf-cache:/data/hf-cache
+      - ./secrets:/run/secrets:ro
     depends_on:
       - redis
       - llm

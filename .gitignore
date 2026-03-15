@@ -212,5 +212,7 @@ implementation_plan.md
 how-to-run-docker-compose.txt
 infra/docker/docker-compose.yml
 infra/docker/.env.example
+infra/docker/secrets/*.json
+!infra/docker/secrets/.gitkeep
 
 hf-cache

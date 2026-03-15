@@ -29,3 +29,23 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
   - `LANGCHAIN_API_KEY`
   - `LANGCHAIN_PROJECT`
   - `LANGCHAIN_ENDPOINT` (optional override)
+- Google Calendar sync (optional):
+  - `GOOGLE_CALENDAR_ENABLED` (default: false)
+  - `GOOGLE_CALENDAR_CREDENTIALS` (path to service-account JSON)
+  - `GOOGLE_CALENDAR_ID` (default: primary)
+  - `GOOGLE_CALENDAR_TIMEZONE` (default: UTC; example: Asia/Bangkok)
+  - `GOOGLE_CALENDAR_SUBJECT` (optional; Google Workspace user email for domain-wide delegation)
+
+## Google Calendar Setup
+1. Create a Google Cloud service account and enable the Google Calendar API for the project.
+2. Download the service-account JSON key.
+3. Decide your target calendar:
+   - Shared calendar: share the calendar with the service-account email and grant `Make changes to events`.
+   - User primary calendar (Workspace): enable domain-wide delegation and set `GOOGLE_CALENDAR_SUBJECT` to the user email.
+4. For Docker Compose:
+   - Copy the key to `infra/docker/secrets/google_calendar_credentials.json`.
+   - In `infra/docker/.env`, set `GOOGLE_CALENDAR_ENABLED=true`.
+   - Set `GOOGLE_CALENDAR_ID` (`primary` or a specific calendar ID) and `GOOGLE_CALENDAR_TIMEZONE`.
+5. Restart `core-ai`.
+
+The API writes events for workspace bookings, leave requests, and travel requests. If Google sync fails, the local DB event is still created.
