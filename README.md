@@ -9,7 +9,35 @@ This repository is an internal AI assistant platform for workplace operations. I
 
 The system is split into a Next.js frontend (`frontend/web`) and a FastAPI backend (`services/core-ai`) with supporting infrastructure in Docker (`infra/docker`).
 
-## 2) How the System Works
+## 2) UI Snapshot
+These screenshots from `other_files/` spotlight the live Next.js experience powered by the backend.
+
+**Chat example**  
+![Sick leave chat](other_files/sick-leave-chat.png)
+This example shows a sick-leave request.
+
+![Room booking chat](other_files/reserve-room-chat.png)
+This example shows a room-booking request.
+
+![Car booking chat](other_files/reserve-car-chat.png)
+This example shows a car-booking request.
+
+**Document upload**  
+![Document upload](other_files/upload-file-page.png)  
+The interface for uploading documents to vector database.
+
+**Request tracking**  
+![Request board](other_files/my-request-board.png)  
+“My Requests” aggregates leave, expense, travel, access, tickets, and workspace bookings.
+
+**Approvals view**  
+![Approvals](other_files/leave-request-approval-page.png)  
+![Approvals](other_files/expense-travel-request-approval-page.png)  
+![Approvals](other_files/access-request-approval-IT-ticket-page.png)  
+Each approver card surfaces the metadata that the backend domain routes capture (`/domain/requests`, `/domain/expenses`, `/domain/access-requests`). Approval buttons hit the same `approve`/`reject` endpoints used by the agent when finalizing requests.
+
+## 3) How the System Works
+
 1. User sends a message from the chat UI.
 2. Backend runs a LangGraph pipeline: `Router -> Domain -> Guardrail`.
 3. Router classifies intent (`request`, `doc_qa`, `generic`) and request domain (`hr`, `ops`, `it`, `workspace`).
@@ -17,7 +45,7 @@ The system is split into a Next.js frontend (`frontend/web`) and a FastAPI backe
 5. Guardrail enforces sensitivity constraints (for example salary-related access).
 6. Results are returned as final response + actions + events; UI streams updates via WebSocket.
 
-### 2.1 Agent Lifecycle (Detailed)
+### 3.1 Agent Lifecycle (Detailed)
 1. Frontend sends message to:
    - WebSocket: `/api/v1/chat/stream` (primary path, streaming UX)
    - HTTP fallback: `/api/v1/chat`
@@ -39,7 +67,7 @@ The system is split into a Next.js frontend (`frontend/web`) and a FastAPI backe
    - token deltas
    - `final_response` object (message, actions, pending_request)
 
-### 2.2 Router Agent (Intent + Domain + Sub-route)
+### 3.2 Router Agent (Intent + Domain + Sub-route)
 Router has multi-stage classification:
 - Stage 1 (`main_route`): `request`, `doc_qa`, or `generic`
 - Stage 1 sensitivity: `normal`, `hr_personal`, `salary`, `access`
@@ -55,7 +83,7 @@ Important behavior:
 - For `doc_qa`, router also classifies document scope (`policy_hr`, `policy_it`, `policy_travel_expense`).
 - If LLM classification fails/invalid, router falls back to safe defaults (`generic`) and heuristic logic.
 
-### 2.3 Domain Agent (Execution + Clarification)
+### 3.3 Domain Agent (Execution + Clarification)
 Domain agent is where business work happens:
 - Chooses handler by domain: HR, OPS, IT, Workspace, or Doc-QA.
 - Extracts structured fields using:
@@ -74,7 +102,7 @@ Examples of required fields:
 - Ticket: `subtype`, `description`, `location`, `entity`, `incident_date`
 - Workspace booking: `resource_type`, `resource_name`, `start_time`, `end_time`
 
-### 2.4 Tool Runner and Domain APIs
+### 3.4 Tool Runner and Domain APIs
 When `TOOLS_ENABLED=true`, the domain agent calls internal endpoints through `ToolRunner`.
 - Base URL is `DOMAIN_SERVICE_URL` (default points back to `core-ai` domain routes).
 - For document search calls, it uses `CORE_API_URL`.
@@ -85,19 +113,19 @@ Primary internal routes called by the agent are under:
 - `/api/v1/domain/*` (leave/expense/travel/access/tickets/workspace)
 - `/api/v1/documents/*` (upload/search)
 
-### 2.5 Guardrail Agent
+### 3.5 Guardrail Agent
 Guardrail runs after domain processing and can override output.
 - Current enforced rule:
   - if sensitivity is `salary` and user lacks `hr_approver` or `system_admin`, response is blocked.
 - When blocked, assistant returns a safe response and clears action side effects in output.
 
-### 2.6 Memory, Sessions, and Titles
+### 3.6 Memory, Sessions, and Titles
 - Redis stores short-lived conversational state and pending request continuation.
 - MongoDB stores durable chat sessions and message history for the UI.
 - Session titles are auto-generated using LLM summary with rule-based fallback.
 - Multi-tenant routing is controlled via `X-Tenant-Id` / `tenant_id`.
 
-### 2.7 Events Sent to Frontend
+### 3.7 Events Sent to Frontend
 The backend emits structured events so UI can show real-time progress:
 - `agent_started`, `agent_finished`
 - `activity` (human-readable stage updates)
@@ -115,9 +143,11 @@ Request and data flow:
 - Document embeddings and retrieval: Qdrant (+ local fallback)
 - Document files: MinIO (S3-compatible)
 - LLM endpoint: Ollama (`qwen3:0.6b` by default)
-- Optional calendar write-back: Google Calendar API
+- Calendar write-back: Google Calendar API
 
-## 3) Tech Stack (Frontend + Backend)
+## 4) Tech Stack (Frontend + Backend)
+
+![Architecture](other_files/system-architecture.png)
 
 ### Frontend
 - Next.js 15 (App Router)
@@ -140,15 +170,15 @@ Request and data flow:
 - Docker Compose
 - Prometheus + Grafana
 
-## 4) Environment Configuration and System Preparation
+## 5) Environment Configuration and System Preparation
 
-### 4.1 Prerequisites
+### 5.1 Prerequisites
 - Docker Desktop + Docker Compose
 - At least 8GB RAM recommended (more is better for embeddings/LLM)
 - If using GPU for Ollama, NVIDIA runtime support
 - Optional for local non-Docker backend: Python 3.11+, Node.js 20+
 
-### 4.2 Configure Docker Environment
+### 5.2 Configure Docker Environment
 1. Copy env template:
    - `copy infra/docker/.env.example infra/docker/.env`
 2. Create external Ollama volume (required by compose):
@@ -167,7 +197,7 @@ Important variables in `infra/docker/.env`:
 - Optional tracing:
   - `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`, `LANGCHAIN_ENDPOINT`
 
-### 4.3 Google Calendar Setup (Optional)
+### 5.3 Google Calendar Setup
 1. Create a Google Cloud service account and enable Google Calendar API.
 2. Download the service-account JSON.
 3. Place it at:
@@ -179,7 +209,7 @@ Important variables in `infra/docker/.env`:
    - `GOOGLE_CALENDAR_TIMEZONE=Asia/Bangkok` (or your timezone)
    - `GOOGLE_CALENDAR_SUBJECT=` only if using Workspace domain-wide delegation
 
-### 4.4 Frontend Runtime Variables
+### 5.4 Frontend Runtime Variables
 The frontend uses these env vars (already set in compose):
 - `NEXT_PUBLIC_API_BASE` (default `http://localhost:8000/api/v1`)
 - `NEXT_PUBLIC_WS_BASE` (default websocket base)
@@ -187,12 +217,12 @@ The frontend uses these env vars (already set in compose):
 - `NEXT_PUBLIC_TENANT_ID` (default `default`)
 - `NEXT_PUBLIC_DEMO_USER` (default `demo-user`)
 
-### 4.5 Notes Before Running
+### 5.5 Notes Before Running
 - `infra/docker/.env` currently exists in this repo; treat it as sensitive and avoid committing real secrets.
 - First startup may take time because Ollama pulls model `qwen3:0.6b` and embedding models may be downloaded.
 - If your machine has no GPU and Ollama fails to start, remove `gpus: all` from the `llm` service in `infra/docker/docker-compose.yml`.
 
-## 5) Step-by-Step: Run the System
+## 6) Step-by-Step: Run the System
 
 ## Option A: Docker Compose (Recommended)
 1. From repo root, prepare env and volume:
