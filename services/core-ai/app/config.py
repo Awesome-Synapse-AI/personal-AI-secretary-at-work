@@ -19,9 +19,6 @@ class Settings(BaseSettings):
     mongo_chat_message_collection: str = "chat_messages"
 
     auth_disabled: bool = True
-    keycloak_realm_url: str = "http://localhost:8080/realms/ai-secretary"
-    keycloak_client_id: str = "core-ai"
-    keycloak_client_secret: str | None = None
 
     # Enable internal domain tools by default so chat actions (leave, expense, etc.)
     # actually call the co-hosted FastAPI endpoints in local/dev runs.

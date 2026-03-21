@@ -46,33 +46,6 @@ services:
     volumes:
       - minio_data:/data
 
-  # keycloak-db:
-  #   image: postgres:16
-  #   environment:
-  #     POSTGRES_DB: ${KEYCLOAK_DB_NAME:-keycloak}
-  #     POSTGRES_USER: ${KEYCLOAK_DB_USER:-keycloak}
-  #     POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak_password}
-  #   volumes:
-  #     - keycloak_data:/var/lib/postgresql/data
-
-  # keycloak:
-  #   image: quay.io/keycloak/keycloak:24.0.5
-  #   command: ["start-dev", "--import-realm"]
-  #   environment:
-  #     KC_DB: postgres
-  #     KC_DB_URL_HOST: keycloak-db
-  #     KC_DB_URL_DATABASE: ${KEYCLOAK_DB_NAME:-keycloak}
-  #     KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
-  #     KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak_password}
-  #     KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-  #     KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_password}
-  #   ports:
-  #     - "8080:8080"
-  #   volumes:
-  #     - ../keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
-  #   depends_on:
-  #     - keycloak-db
-
   prometheus:
     image: prom/prometheus:v2.54.1
     volumes:
@@ -102,8 +75,6 @@ services:
       REDIS_URL: redis://redis:6379/0
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
       AUTH_DISABLED: ${AUTH_DISABLED:-true}
-      KEYCLOAK_REALM_URL: http://keycloak:8080/realms/ai-secretary
-      KEYCLOAK_CLIENT_ID: core-ai
       TOOLS_ENABLED: ${TOOLS_ENABLED:-false}
       SERVICE_AUTH_TOKEN: ${SERVICE_AUTH_TOKEN:-}
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
@@ -168,7 +139,6 @@ volumes:
   mongo_data:
   qdrant_data:
   minio_data:
-  keycloak_data:
   prometheus_data:
   grafana_data:
   ollama_data:
