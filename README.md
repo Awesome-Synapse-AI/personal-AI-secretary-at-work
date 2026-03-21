@@ -38,6 +38,8 @@ Each approver card surfaces the metadata that the backend domain routes capture 
 
 ## 3) How the System Works
 
+![system-workflow](other_files/chatbot-workflow.png)  
+
 1. User sends a message from the chat UI.
 2. Backend runs a LangGraph pipeline: `Router -> Domain -> Guardrail`.
 3. Router classifies intent (`request`, `doc_qa`, `generic`) and request domain (`hr`, `ops`, `it`, `workspace`).
