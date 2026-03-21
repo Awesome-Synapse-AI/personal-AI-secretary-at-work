@@ -35,7 +35,7 @@ def require_roles(user: UserContext, allowed_roles: set[str], action: str) -> No
     )
 
 
-async def get_current_user(*_args, **_kwargs) -> UserContext:
+async def get_current_user() -> UserContext:
     user = _default_user()
     bind_contextvars(user_id=user.sub, roles=user.roles)
     return user
