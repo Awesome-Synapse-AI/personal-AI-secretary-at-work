@@ -134,12 +134,11 @@ Request and data flow:
 - Qdrant + Sentence Transformers + LlamaIndex
 - MinIO (boto3)
 - OCR/PDF extraction: Tesseract, PyPDF2, PyMuPDF
-- Auth: Keycloak-compatible JWT (can be disabled in local/dev)
+- Auth: local dev identity (no external IdP required)
 
 ### Infrastructure / Observability
 - Docker Compose
 - Prometheus + Grafana
-- Optional Keycloak (service is present but commented in compose)
 
 ## 4) Environment Configuration and System Preparation
 
